@@ -4,6 +4,7 @@ a cavallo della soglia."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -32,11 +33,29 @@ def compute_ewma_vol(returns: pd.Series, span: int) -> pd.Series:
 @dataclass
 class VolRegimeState:
     """Stato di vol (alta/bassa) per un asset, con isteresi. `is_high_vol`
-    parte False (bassa vol) finché il primo update non lo cambia."""
+    parte False (bassa vol) finché il primo update non lo cambia.
+
+    `update` rifiuta esplicitamente un `latest_vol` NaN (auto-invalidazione):
+    in Python `nan >= soglia` è sempre False, quindi senza guardia un NaN
+    verrebbe interpretato da `next_state` come "sotto ogni soglia" e farebbe
+    silenziosamente il downgrade di uno stato high-vol proprio quando i dati
+    a monte sono inaffidabili — il momento peggiore per farlo."""
 
     config: VolStateConfig
     is_high_vol: bool = False
 
     def update(self, latest_vol: float) -> bool:
+        if math.isnan(latest_vol):
+            raise ValueError(
+                "VolRegimeState.update ha ricevuto latest_vol=NaN: è un "
+                "problema di data-quality a monte (tick di prezzo mancante/"
+                "bad), non un segnale di bassa volatilità. Lo stato si "
+                "rifiuta di fare downgrade silenzioso su un input "
+                "inaffidabile. Il chiamante deve gestire il NaN esso "
+                "stesso — es. non invocare update() finché non arrivano "
+                "dati validi, oppure applicare una policy di fallback "
+                "esplicita decisa a parte — non interpretarlo qui in "
+                "automatico."
+            )
         self.is_high_vol = next_state(self.is_high_vol, latest_vol, self.config.band)
         return self.is_high_vol

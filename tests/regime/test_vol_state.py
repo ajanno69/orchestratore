@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from regime.vol_state import VolRegimeState, VolStateConfig, compute_ewma_vol
 
@@ -38,3 +39,18 @@ def test_vol_state_turns_off_only_below_exit_threshold():
     state.update(0.9)
     state.update(0.5)
     assert state.is_high_vol is False
+
+
+def test_vol_state_update_raises_on_nan_instead_of_silently_downgrading():
+    """Un NaN in ingresso è un problema di data-quality upstream, non un
+    segnale di bassa vol: lo stato deve rifiutarsi esplicitamente invece di
+    fare downgrade silenzioso (vedi review Task 5)."""
+    config = VolStateConfig(ewma_span=10, enter_threshold=0.8, exit_threshold=0.6)
+    state = VolRegimeState(config=config)
+    state.update(0.9)  # entra in high-vol
+    assert state.is_high_vol is True
+
+    with pytest.raises(ValueError):
+        state.update(float("nan"))
+
+    assert state.is_high_vol is True  # invariato: nessun downgrade silenzioso
