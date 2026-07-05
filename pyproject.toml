@@ -27,6 +27,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "D:/Claude/quantpedia-validation/src"]
+# Required: test directories (tests/regime/, tests/forecasts/, etc.) share names with src/ counterparts,
+# causing pytest's default "prepend" import mode to collide on same-named test module basenames (e.g., two test_store.py).
+# importlib mode prevents shadowing of src/* by test packages without needing unsafe __init__.py files.
 addopts = ["--import-mode=importlib"]
 
 [build-system]
