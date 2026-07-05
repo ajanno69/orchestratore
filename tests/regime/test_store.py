@@ -83,17 +83,31 @@ def test_restart_no_flip_reseeds_high_vol_state_from_persisted_snapshot(tmp_path
     """Lo scenario che ha motivato questo task: stato vero pre-riavvio =
     high-vol (True), un riavvio del processo NON deve far tornare lo stato
     a bassa vol solo perché la nuova vol osservata cade nella banda morta
-    [exit, enter). Senza reseeding esplicito, VolRegimeState() partirebbe
-    dal default della dataclass (False) e un update(0.7) - dentro
-    [0.6, 0.8) - lo lascerebbe erroneamente False. Con il reseeding dal
-    RegimeSnapshot persistito, resta correttamente True."""
+    [exit, enter). Con il reseeding dal RegimeSnapshot persistito, lo stato
+    resta correttamente True dopo update(0.7) (dentro [0.6, 0.8)).
+
+    Controfattuale eseguibile (non solo prosa): senza reseeding esplicito,
+    VolRegimeState(config=config) parte dal default della dataclass
+    (is_high_vol=False) e lo stesso update(0.7) - dentro la banda morta -
+    lo lascia erroneamente False, perdendo silenziosamente lo stato vero
+    pregresso. Il test dimostra entrambi i rami fianco a fianco."""
     store = RegimeStateStore(tmp_path)
     store.write(build_snapshot(True, False, False, now=datetime(2026, 7, 5, 0, 0, 0)))
 
     resolved = resolve_initial_snapshot(store)
     config = VolStateConfig(ewma_span=20, enter_threshold=0.8, exit_threshold=0.6)
+
+    # Ramo reseeded: lo stato vero (True) sopravvive al riavvio.
     state = VolRegimeState(config=config, is_high_vol=resolved.btc_high_vol)
     assert state.is_high_vol is True
 
     state.update(0.7)  # dentro la banda morta: nessun flip indotto dal riavvio
     assert state.is_high_vol is True
+
+    # Ramo cold-start (controfattuale): stessa config, stesso update(0.7),
+    # ma senza reseeding dallo snapshot persistito -> flip silenzioso a False.
+    cold = VolRegimeState(config=config)
+    assert cold.is_high_vol is False  # default della dataclass, non lo stato reale
+
+    cold.update(0.7)
+    assert cold.is_high_vol is False  # dimostra la perdita di stato senza reseeding
