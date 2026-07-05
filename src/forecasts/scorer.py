@@ -35,11 +35,27 @@ def score_forecasts(forecasts: pd.DataFrame, outcomes: pd.Series, horizon: str) 
     realizzato), stesso indice di `forecasts` (allineata dal chiamante —
     lo scorer non fa I/O di prezzi, ADR-036 §4: 'prima la misura, poi il
     misurato')."""
+    if len(forecasts) != len(outcomes):
+        raise ValueError(
+            f"forecasts e outcomes hanno lunghezze diverse ({len(forecasts)} vs "
+            f"{len(outcomes)}): non possono essere allineati posizionalmente — "
+            "il chiamante deve allinearli esplicitamente prima di chiamare lo scorer."
+        )
+
     block_size = _HORIZON_DAYS[horizon]
     mask = _non_overlapping_block_mask(len(forecasts), block_size)
 
     p_up = forecasts["p_up"].reset_index(drop=True)[mask]
     actual = outcomes.reset_index(drop=True)[mask]
+
+    # Un outcome NaN (dato di prezzo mancante quel giorno) significa "non
+    # sappiamo" — non è la stessa cosa di "previsione sbagliata". Va escluso
+    # in modo esplicito e consistente da TUTTE le metriche (n, hit_rate,
+    # brier_score, calibrazione), non lasciato che ciascuna lo tratti a modo
+    # suo (confronto booleano lo conta come miss, la media lo skippa).
+    known_mask = actual.notna()
+    p_up = p_up[known_mask]
+    actual = actual[known_mask]
 
     n = len(p_up)
     if n == 0:

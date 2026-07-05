@@ -59,3 +59,25 @@ def test_calibration_buckets_group_by_decile():
     assert n == 2
     assert avg_p == pytest.approx((0.75 + 0.72) / 2)
     assert actual_rate == pytest.approx(0.5)
+
+
+def test_mismatched_lengths_raises_explicit_error():
+    forecasts = _forecasts_df([0.9, 0.1, 0.9])
+    outcomes = pd.Series([True, False])
+    with pytest.raises(ValueError, match="lunghezze diverse"):
+        score_forecasts(forecasts, outcomes, horizon="24h")
+
+
+def test_unknown_outcomes_excluded_consistently_from_all_metrics():
+    # 3 previsioni a 24h (block_size=1 -> tutte e 3 candidate). La riga
+    # centrale ha outcome NaN ("non sappiamo") e deve essere esclusa da
+    # n_forecasts, hit_rate e brier_score in modo consistente, non contata
+    # come "miss" da un lato e skippata dall'altro.
+    forecasts = _forecasts_df([0.9, 0.9, 0.1])
+    outcomes = pd.Series([True, float("nan"), False])
+    result = score_forecasts(forecasts, outcomes, horizon="24h")
+    assert result.n_forecasts == 2
+    # Righe rimaste: p_up=0.9 -> actual=True (hit), p_up=0.1 -> actual=False (hit)
+    assert result.hit_rate == 1.0
+    expected_brier = ((0.9 - 1.0) ** 2 + (0.1 - 0.0) ** 2) / 2
+    assert result.brier_score == pytest.approx(expected_brier)
