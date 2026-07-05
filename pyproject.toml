@@ -27,6 +27,7 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "D:/Claude/quantpedia-validation/src"]
+addopts = ["--import-mode=importlib"]
 
 [build-system]
 requires = ["setuptools>=68"]
