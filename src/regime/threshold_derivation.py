@@ -10,6 +10,7 @@ percentile a runtime nel layer v0."""
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -66,7 +67,27 @@ def simulate_hysteresis_path(
     vol_series: pd.Series, band: HysteresisBand, initial_state: bool = False
 ) -> pd.Series:
     """Applica `regime.hysteresis.next_state` in sequenza lungo `vol_series`,
-    restituendo la serie di stati risultante (stesso indice di `vol_series`)."""
+    restituendo la serie di stati risultante (stesso indice di `vol_series`).
+
+    Riproduce fedelmente `VolRegimeState.update` (`regime.vol_state`),
+    incluso il suo guard sui valori non-finiti: un NaN o un infinito in
+    `vol_series` solleva `ValueError` invece di essere silenziosamente
+    interpretato da `next_state` come "sotto"/"sopra" ogni soglia (stesso
+    principio di auto-invalidazione di `VolRegimeState.update`). Il
+    chiamante di produzione (`scripts/derive_vol_thresholds.py`) già
+    scarta i NaN a monte con `.dropna()`, ma questo guard rende la
+    fedeltà della simulazione vera per costruzione, non solo per
+    convenzione del chiamante."""
+    if not vol_series.map(math.isfinite).all():
+        raise ValueError(
+            "simulate_hysteresis_path ha ricevuto un valore non-finito (NaN "
+            "o infinito) in vol_series: la simulazione si rifiuta di "
+            "interpretarlo silenziosamente come sotto/sopra soglia, stesso "
+            "principio del guard in VolRegimeState.update. Il chiamante "
+            "deve garantire una serie di vol interamente finita (es. "
+            "tramite .dropna()) prima di invocare questa funzione."
+        )
+
     state = initial_state
     output = []
     for value in vol_series:

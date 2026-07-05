@@ -68,6 +68,16 @@ def test_simulate_hysteresis_path_accepts_custom_initial_state():
     assert bool(result.iloc[0]) is True
 
 
+def test_simulate_hysteresis_path_raises_on_non_finite_value():
+    """Stessa fedelta' del guard in VolRegimeState.update: un NaN o
+    infinito in vol_series non deve essere interpretato silenziosamente
+    da next_state come sotto/sopra soglia."""
+    band = HysteresisBand(enter=0.8, exit=0.6)
+    vol_series = pd.Series([0.9, float("nan"), 0.85])
+    with pytest.raises(ValueError, match="non-finito"):
+        simulate_hysteresis_path(vol_series, band)
+
+
 def test_evaluate_threshold_candidate_computes_all_metrics():
     idx = pd.date_range("2024-01-01", periods=4, freq="D")
     vol_series = pd.Series([0.9, 0.7, 0.5, 0.85], index=idx)
@@ -78,6 +88,22 @@ def test_evaluate_threshold_candidate_computes_all_metrics():
     assert metrics.fraction_high_vol == pytest.approx(0.75)
     assert metrics.dwell_times == [2, 1, 1]
     assert metrics.min_dwell_time == 1
+
+
+def test_evaluate_threshold_candidate_multi_cycle_enter_exit_reenter():
+    """Ciclo completo enter->exit->re-enter (non monotono): il comportamento
+    che conta di piu' per questo modulo, dato che BTC/ETH reali attraversano
+    la banda morta ripetutamente (vedi output reale dello script di
+    derivazione: 20 transizioni BTC, 33 ETH sul periodo 2019-2026)."""
+    idx = pd.date_range("2024-01-01", periods=10, freq="D")
+    vol_series = pd.Series([0.9, 0.85, 0.5, 0.4, 0.3, 0.95, 0.88, 0.5, 0.92, 0.6], index=idx)
+    metrics = evaluate_threshold_candidate(vol_series, enter=0.8, exit=0.6)
+    # stati: T,T,F,F,F,T,T,F,T,T
+    # enter -> dead band -> exit -> flat low -> re-enter -> dead band -> exit -> re-enter
+    assert metrics.dwell_times == [2, 3, 2, 1, 2]
+    assert metrics.min_dwell_time == 1
+    assert metrics.transitions_per_year == {2024: 4}
+    assert metrics.fraction_high_vol == pytest.approx(0.6)
 
 
 def test_search_threshold_candidates_filters_by_criterion():
