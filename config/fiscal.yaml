@@ -1,0 +1,38 @@
+# Copiato da quantpedia-validation/config/fiscal.yaml (stesse aliquote,
+# stesso schema — richiesto dal loader condiviso fiscal.classifier.load_fiscal_rules,
+# che indicizza tutte e tre le categorie). Solo crypto_c_sexies e' rilevante
+# per l'orchestratore (Binario A/harvester); etf_ucits/fx_leva restano per
+# compatibilita' con lo schema del motore riusato.
+fiscal_year_end_month: 12
+cost_method: LIFO
+cost_method_da_confermare_commercialista: true
+categories:
+  etf_ucits:
+    gain:
+      tax_category: redditi_di_capitale
+      rate: 0.26
+      compensabile: false
+    loss:
+      tax_category: redditi_diversi
+      rate: 0.26
+      compensabile: true
+      carry_forward_years: 4
+    da_confermare_commercialista: false
+  fx_leva:
+    differenziale:
+      tax_category: redditi_diversi
+      rate: 0.26
+      compensabile: true
+      carry_forward_years: 4
+    da_confermare_commercialista: true
+  crypto_c_sexies:
+    differenziale:
+      tax_category: redditi_diversi
+      rate: 0.33
+      compensabile: true
+      carry_forward_years: 4
+    da_confermare_commercialista: false
+dividends:
+  etf_distribuzione:
+    tax_category: redditi_di_capitale
+  preferire_accumulazione: true
