@@ -68,6 +68,27 @@ def test_mismatched_lengths_raises_explicit_error():
         score_forecasts(forecasts, outcomes, horizon="24h")
 
 
+def test_score_forecasts_raises_on_non_finite_p_up():
+    forecasts = _forecasts_df([0.9, float("nan"), 0.1])
+    outcomes = pd.Series([True, False, False])
+    with pytest.raises(ValueError, match="p_up non-finiti"):
+        score_forecasts(forecasts, outcomes, horizon="24h")
+
+
+def test_all_outcomes_nan_in_block_degrades_to_empty_result():
+    # horizon="24h" -> block_size=1, ogni riga è block-eligible. Tutti gli
+    # outcome sono NaN: n_forecasts deve degradare a 0 e il risultato deve
+    # combaciare col percorso "input vuoto" (nessun crash, nessuna
+    # divisione per zero), non solo per ispezione manuale ma verificato qui.
+    forecasts = _forecasts_df([0.9, 0.5, 0.1])
+    outcomes = pd.Series([float("nan"), float("nan"), float("nan")])
+    result = score_forecasts(forecasts, outcomes, horizon="24h")
+    assert result.n_forecasts == 0
+    assert pd.isna(result.hit_rate)
+    assert pd.isna(result.brier_score)
+    assert result.calibration_buckets == {}
+
+
 def test_unknown_outcomes_excluded_consistently_from_all_metrics():
     # 3 previsioni a 24h (block_size=1 -> tutte e 3 candidate). La riga
     # centrale ha outcome NaN ("non sappiamo") e deve essere esclusa da

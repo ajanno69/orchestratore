@@ -7,6 +7,7 @@ autocorrelazione (obbligatorio, ADR-036 §4)."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import pandas as pd
@@ -40,6 +41,20 @@ def score_forecasts(forecasts: pd.DataFrame, outcomes: pd.Series, horizon: str) 
             f"forecasts e outcomes hanno lunghezze diverse ({len(forecasts)} vs "
             f"{len(outcomes)}): non possono essere allineati posizionalmente — "
             "il chiamante deve allinearli esplicitamente prima di chiamare lo scorer."
+        )
+
+    if not forecasts["p_up"].apply(math.isfinite).all():
+        raise ValueError(
+            "score_forecasts ha ricevuto p_up non-finiti (NaN o infinito): "
+            "è un problema di data-quality a monte (un output di modello "
+            "rotto), non una probabilità valida. In Python `nan >= 0.5` e "
+            "`-inf >= 0.5` sono sempre False, quindi senza questa guardia un "
+            "p_up non-finito verrebbe interpretato silenziosamente come "
+            "'previsione al ribasso' — esattamente l'inconsistenza "
+            "cross-metrica che la guardia sugli outcome NaN ha già "
+            "eliminato dal lato outcome, qui riproposta sul lato "
+            "previsione. Il chiamante deve garantire p_up finiti prima di "
+            "invocare lo scorer."
         )
 
     block_size = _HORIZON_DAYS[horizon]
