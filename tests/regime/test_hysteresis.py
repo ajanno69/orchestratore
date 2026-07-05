@@ -23,6 +23,17 @@ def test_state_does_not_flip_flop_oscillating_in_dead_band():
     assert state is False  # mai salito sopra enter=1.0
 
 
+def test_state_does_not_flip_flop_oscillating_in_dead_band_while_on():
+    """ON-side symmetric counterpart to OFF-side flip-flop test: once turned ON,
+    oscillation within the dead band must not trigger unwanted OFF transitions."""
+    band = HysteresisBand(enter=1.0, exit=0.8)
+    state = next_state(False, 1.1, band)  # Transition to True
+    assert state is True
+    for value in [0.9, 0.85, 0.95, 0.82, 0.99, 0.81]:
+        state = next_state(state, value, band)
+    assert state is True  # mai sceso sotto exit=0.8
+
+
 def test_degenerate_band_raises():
     with pytest.raises(ValueError):
         HysteresisBand(enter=0.8, exit=1.0)
