@@ -974,14 +974,14 @@ git commit -m "feat: loader config regime (soglie vol/funding per asset)"
 
 ---
 
-### Task 8: Regime state persistence
+### Task 8: Regime state persistence (con reseeding esplicito al riavvio)
 
 **Files:**
 - Create: `src/regime/store.py`
 - Test: `tests/regime/test_store.py`
 
 **Interfaces:**
-- Produces: `RegimeSnapshot(timestamp: str, btc_high_vol: bool, eth_high_vol: bool, eth_harvester_on: bool)`, `build_snapshot(btc_high_vol, eth_high_vol, eth_harvester_on, now=None) -> RegimeSnapshot`, `RegimeStateStore(base_path).write(snapshot)` / `.read() -> RegimeSnapshot | None`. Consumato da Task 9 (`report/regime_report.py`) e Task 15 (`weekly_report.py`).
+- Produces: `RegimeSnapshot(timestamp: str, btc_high_vol: bool, eth_high_vol: bool, eth_harvester_on: bool)`, `build_snapshot(btc_high_vol, eth_high_vol, eth_harvester_on, now=None) -> RegimeSnapshot`, `RegimeStateStore(base_path).write(snapshot)` / `.read() -> RegimeSnapshot | None` (raises `ValueError` on a corrupted/unreadable snapshot file — mai un fallback silenzioso), `resolve_initial_snapshot(store: RegimeStateStore) -> RegimeSnapshot` (primo avvio assoluto senza snapshot pregresso -> default esplicito e documentato, MAI il default implicito del linguaggio). Consumato da Task 9 (`report/regime_report.py`) e Task 15 (`weekly_report.py`). Il chiamante che ricostruisce `VolRegimeState`/`FundingRegimeState` dopo un riavvio deve passare `is_high_vol=resolved.btc_high_vol` (o l'equivalente) al costruttore invece di lasciare il default `False` della dataclass — questo è il meccanismo di reseeding "restart-no-flip": senza, un riavvio con vol nella banda morta reintrodurrebbe il difetto di flip già chiuso in Task 5.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -991,7 +991,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from regime.store import RegimeStateStore, build_snapshot
+import pytest
+
+from regime.store import RegimeStateStore, build_snapshot, resolve_initial_snapshot
+from regime.vol_state import VolRegimeState, VolStateConfig
 
 
 def test_build_snapshot_formats_timestamp_iso_utc():
@@ -1022,6 +1025,66 @@ def test_store_write_overwrites_previous_snapshot(tmp_path):
     loaded = store.read()
     assert loaded.btc_high_vol is True
     assert loaded.timestamp == "2026-07-06T00:00:00Z"
+
+
+def test_read_raises_explicit_error_on_corrupted_snapshot_file(tmp_path):
+    """Un file corrotto/illeggibile è un segnale di un problema a monte, non
+    un default silenzioso su cui basare una decisione di regime (stesso
+    principio del guard NaN/inf in vol_state.py)."""
+    store = RegimeStateStore(tmp_path)
+    (tmp_path / "regime_state.json").write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrotto o illeggibile"):
+        store.read()
+
+
+def test_read_raises_explicit_error_on_snapshot_missing_required_field(tmp_path):
+    store = RegimeStateStore(tmp_path)
+    path = tmp_path / "regime_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"timestamp": "2026-07-05T00:00:00Z"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="corrotto o illeggibile"):
+        store.read()
+
+
+def test_resolve_initial_snapshot_defaults_explicitly_on_first_ever_startup(tmp_path):
+    """Primo avvio assoluto (nessuno snapshot pregresso): lo stato iniziale
+    è una scelta esplicita e documentata (bassa vol, harvester off), non il
+    default implicito del linguaggio (coerente con VolRegimeState.is_high_vol
+    che parte da False di suo, ma qui la scelta è dichiarata a livello di
+    store, non lasciata al caso)."""
+    store = RegimeStateStore(tmp_path)
+    snapshot = resolve_initial_snapshot(store)
+    assert snapshot.btc_high_vol is False
+    assert snapshot.eth_high_vol is False
+    assert snapshot.eth_harvester_on is False
+
+
+def test_resolve_initial_snapshot_returns_persisted_snapshot_when_present(tmp_path):
+    store = RegimeStateStore(tmp_path)
+    store.write(build_snapshot(True, False, True, now=datetime(2026, 7, 5, 0, 0, 0)))
+    resolved = resolve_initial_snapshot(store)
+    assert resolved.btc_high_vol is True
+    assert resolved.eth_harvester_on is True
+
+
+def test_restart_no_flip_reseeds_high_vol_state_from_persisted_snapshot(tmp_path):
+    """Lo scenario che ha motivato questo task: stato vero pre-riavvio =
+    high-vol (True), un riavvio del processo NON deve far tornare lo stato
+    a bassa vol solo perché la nuova vol osservata cade nella banda morta
+    [exit, enter). Senza reseeding esplicito, VolRegimeState() partirebbe
+    dal default della dataclass (False) e un update(0.7) - dentro
+    [0.6, 0.8) - lo lascerebbe erroneamente False. Con il reseeding dal
+    RegimeSnapshot persistito, resta correttamente True."""
+    store = RegimeStateStore(tmp_path)
+    store.write(build_snapshot(True, False, False, now=datetime(2026, 7, 5, 0, 0, 0)))
+
+    resolved = resolve_initial_snapshot(store)
+    config = VolStateConfig(ewma_span=20, enter_threshold=0.8, exit_threshold=0.6)
+    state = VolRegimeState(config=config, is_high_vol=resolved.btc_high_vol)
+    assert state.is_high_vol is True
+
+    state.update(0.7)  # dentro la banda morta: nessun flip indotto dal riavvio
+    assert state.is_high_vol is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1036,7 +1099,15 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'regime.store'`
 """Persistenza dello stato di regime corrente (ADR-036 §3: 'output: regime
 corrente persistito + esposto al report'). Stato singolo (non append-only:
 il regime è uno STATO, non un evento storico) — un JSON con l'ultimo
-snapshot, sovrascritto a ogni update."""
+snapshot, sovrascritto a ogni update.
+
+`resolve_initial_snapshot` è il punto di reseeding al riavvio: chi
+ricostruisce `VolRegimeState`/`FundingRegimeState` dopo un riavvio del
+processo DEVE passare il valore risolto qui come `is_high_vol`/
+`is_harvester_on` iniziale, non lasciare il default `False` della
+dataclass — altrimenti un riavvio con l'osservazione corrente dentro la
+banda morta reintroduce esattamente il flip spurio che l'isteresi doveva
+prevenire."""
 
 from __future__ import annotations
 
@@ -1079,7 +1150,16 @@ class RegimeStateStore:
     def read(self) -> RegimeSnapshot | None:
         if not self._path.exists():
             return None
-        return RegimeSnapshot.from_dict(json.loads(self._path.read_text(encoding="utf-8")))
+        try:
+            raw = json.loads(self._path.read_text(encoding="utf-8"))
+            return RegimeSnapshot.from_dict(raw)
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"snapshot di regime corrotto o illeggibile in {self._path}: {exc}. "
+                "Non si può decidere lo stato di regime da un file corrotto — "
+                "ripristinare da backup o cancellare il file per ripartire dal "
+                "default esplicito (resolve_initial_snapshot) prima di riavviare."
+            ) from exc
 
 
 def build_snapshot(
@@ -1092,6 +1172,26 @@ def build_snapshot(
         eth_high_vol=eth_high_vol,
         eth_harvester_on=eth_harvester_on,
     )
+
+
+def resolve_initial_snapshot(store: RegimeStateStore) -> RegimeSnapshot:
+    """Stato da usare per riseminare `VolRegimeState`/`FundingRegimeState`
+    all'avvio del processo. Se esiste uno snapshot persistito, è quello
+    (reseeding: nessun flip indotto dal solo riavvio). Se NON esiste ancora
+    nessuno snapshot (primo avvio assoluto), il default è dichiarato qui
+    esplicitamente — bassa vol su entrambi gli asset, harvester OFF — non
+    lasciato al default implicito della dataclass `VolRegimeState`/
+    `FundingRegimeState` (che per conto suo parte comunque da False, ma la
+    scelta va presa e documentata a questo livello, non per coincidenza)."""
+    snapshot = store.read()
+    if snapshot is not None:
+        return snapshot
+    return RegimeSnapshot(
+        timestamp="1970-01-01T00:00:00Z",  # nessuna osservazione reale ancora
+        btc_high_vol=False,
+        eth_high_vol=False,
+        eth_harvester_on=False,
+    )
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1103,7 +1203,7 @@ Expected: PASS
 
 ```bash
 git add src/regime/store.py tests/regime/test_store.py
-git commit -m "feat: persistenza dello stato di regime corrente"
+git commit -m "feat: persistenza dello stato di regime con reseeding esplicito al riavvio (restart-no-flip)"
 ```
 
 ---
