@@ -1,0 +1,13 @@
+# Soglie regime layer v0 (ADR-036 §3) — regole semplici, isteresi obbligatoria.
+vol:
+  ewma_span: 20
+  btc:
+    enter_threshold: 0.80   # vol annualizzata EWMA, soglia di ingresso high-vol
+    exit_threshold: 0.60    # soglia di uscita (isteresi: exit < enter)
+  eth:
+    enter_threshold: 1.00
+    exit_threshold: 0.75
+funding:
+  eth:
+    enter_threshold: 0.0005   # funding rate, soglia harvester ON
+    exit_threshold: 0.0002
