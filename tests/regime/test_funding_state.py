@@ -29,6 +29,30 @@ def test_funding_state_turns_off_only_below_exit_threshold():
     assert state.is_harvester_on is False
 
 
+def test_funding_state_raises_on_non_finite_rate():
+    """Un NaN in ingresso è un problema di data-quality upstream, non un
+    segnale di funding sotto soglia: lo stato deve rifiutarsi
+    esplicitamente invece di fare downgrade silenzioso dell'harvester
+    (vedi review finale Task 5 / funding_state). NaN e +inf/-inf sono
+    tutti casi di input non-finito rifiutati da `update`."""
+    config = FundingStateConfig(enter_threshold=0.0005, exit_threshold=0.0002)
+    state = FundingRegimeState(config=config)
+    state.update(0.0008)  # harvester ON
+    assert state.is_harvester_on is True
+
+    with pytest.raises(ValueError):
+        state.update(float("nan"))
+    assert state.is_harvester_on is True  # invariato: nessun downgrade silenzioso
+
+    with pytest.raises(ValueError):
+        state.update(float("inf"))
+    assert state.is_harvester_on is True  # invariato
+
+    with pytest.raises(ValueError):
+        state.update(float("-inf"))
+    assert state.is_harvester_on is True  # invariato
+
+
 class _FakeExchange:
     def __init__(self, funding_rate: float) -> None:
         self._funding_rate = funding_rate
