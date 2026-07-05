@@ -97,3 +97,17 @@ def test_inventory_store_roundtrip(tmp_path):
     path2 = store.save(snap2)
     latest_before_2 = store.load_latest_before(exclude_path=path2)
     assert latest_before_2.timestamp == "2026-07-04T00:00:00Z"
+
+
+def test_inventory_store_does_not_overwrite_two_snapshots_on_same_day(tmp_path):
+    store = InventoryStore(tmp_path)
+    snap_morning = InventorySnapshot(timestamp="2026-07-05T09:00:00Z")
+    snap_evening = InventorySnapshot(timestamp="2026-07-05T18:00:00Z")
+    _path_morning = store.save(snap_morning)
+    path_evening = store.save(snap_evening)
+
+    saved_files = list(tmp_path.glob("snapshot-*.json"))
+    assert len(saved_files) == 2
+
+    latest_before_evening = store.load_latest_before(exclude_path=path_evening)
+    assert latest_before_evening.timestamp == "2026-07-05T09:00:00Z"

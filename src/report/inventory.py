@@ -113,15 +113,18 @@ def diff_snapshots(previous: InventorySnapshot | None, current: InventorySnapsho
 class InventoryStore:
     """Snapshot storici su disco (uno per run, mai sovrascritti — a
     differenza di RegimeStateStore che tiene solo il corrente: qui serve
-    lo storico per il diff settimanale)."""
+    lo storico per il diff settimanale). Il filename usa il timestamp
+    COMPLETO (non solo la data) con `:` sostituiti da `-` per restare
+    validi su Windows, es. `snapshot-2026-07-05T12-00-00Z.json` — così
+    due run nello stesso giorno UTC non si sovrascrivono a vicenda."""
 
     def __init__(self, base_path: Path | str) -> None:
         self._base_path = Path(base_path)
 
     def save(self, snapshot: InventorySnapshot) -> Path:
         self._base_path.mkdir(parents=True, exist_ok=True)
-        date_part = snapshot.timestamp.split("T")[0]
-        path = self._base_path / f"snapshot-{date_part}.json"
+        safe_timestamp = snapshot.timestamp.replace(":", "-")
+        path = self._base_path / f"snapshot-{safe_timestamp}.json"
         path.write_text(json.dumps(snapshot.to_dict(), indent=2), encoding="utf-8")
         return path
 
