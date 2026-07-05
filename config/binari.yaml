@@ -1,0 +1,6 @@
+# Vincoli operativi Binario A / Binario B (ADR-036 §1, §2).
+budget_cap_eur: 5000.0
+binario_b:
+  horizons: ["24h", "72h"]
+  emission_hour_utc: 0
+  assets: ["BTC", "ETH"]
