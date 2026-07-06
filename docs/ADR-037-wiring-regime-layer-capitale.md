@@ -187,5 +187,16 @@ di regime instabile (flip-flop a monte).
 `max_transitions=3` per `window=timedelta(hours=1)`. Le decisioni operative si fissano prima del
 momento in cui contano, non durante — stesso principio già applicato alle soglie di vol (M1.5) e
 alla convenzione UTC (checkpoint 1). Vedi `docs/m2-checkpoint2-wiring-demo-report.md` per la
-dimostrazione empirica su cui questo valore è stato scelto, e l'eventuale report integrativo di
-review per qualunque revisione di questo valore emersa dalla review indipendente del checkpoint 2.
+dimostrazione empirica su cui questo valore è stato scelto, e
+`docs/m2-checkpoint2-review-integrativo.md` per l'esito della review indipendente.
+
+**Contratto di riavvio (dichiarato qui per completezza, fonte di verità nel codice — vedi
+docstring di `src/components/wiring_sequencer.py`):** lo stato di dedup di `WiringSequencer` è
+interamente in-memory ed effimero. Dopo un riavvio del processo, il primo tick riemette sempre il
+comando e l'eventuale alert dello stato corrente. Sicuro SOLO perché ogni comando prodotto oggi
+(`HarvesterCommand`/`GridBtcCommand`) è level-triggered e idempotente (ridichiara uno stato, non
+esegue un'azione one-shot) — **non** persistere questo stato su disco: aggiungerebbe un secondo
+punto di guasto in un componente il cui scopo è il fail-safe su dati inaffidabili. Un futuro
+executor che trattasse un comando come azione one-shot (es. `GridBtcCommand.HIGH_VOL_CLOSE_GRID_ORDERLY`,
+già nell'enum, letto come "esegui la chiusura ORA") romperebbe questa assunzione — collegarlo senza
+prima renderlo idempotente è un incidente di governance ADR-037, non un bug qualunque.

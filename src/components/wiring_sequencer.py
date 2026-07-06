@@ -139,6 +139,16 @@ class WiringSequencer:
         is_unstable = len(self._transition_times) > self._rate_limit.max_transitions
 
         if is_unstable:
+            # Nota (re-review checkpoint 2): un conteggio di transizioni che
+            # oscilla proprio intorno alla soglia (es. 3/4/3/4...) fa
+            # disarmare e riarmare `_aggregate_alert_active` più volte,
+            # ciascuna delle quali azzera `_last_instability_alert_at` — la
+            # cadenza percepita del promemoria può quindi essere più fitta
+            # di "una volta per finestra" in questo caso di bordo. Non è il
+            # difetto originale (silenzio prolungato): è l'opposto, una
+            # possibile sovra-notifica in un caso specifico. Non richiede
+            # fix, solo questa nota per chi legge il testo dell'alert
+            # aspettandosi una cadenza rigida.
             due_for_reminder = (
                 self._last_instability_alert_at is None
                 or (now - self._last_instability_alert_at) >= self._rate_limit.window
