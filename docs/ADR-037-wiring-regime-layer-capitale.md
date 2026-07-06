@@ -173,3 +173,19 @@ mai esistito:
   il contenuto reale del file citato. Regola che ne esce, valida anche per questo repo: ogni
   affermazione "verificato X" in un documento deve includere comando eseguito + output osservato,
   mai una prosa non falsificabile.
+
+## 9. Sequenziamento comandi/alert e rate-limit (pre-registrato al checkpoint 2, 2026-07-06)
+
+`resolve_wiring_decision` (Task 1) è puro: nessuna memoria del tick precedente. Un consumatore
+esterno (log, canale alert) ha bisogno di un livello stateful sopra — `WiringSequencer`
+(`src/components/wiring_sequencer.py`, costruito durante la dimostrazione del checkpoint 2, non
+previsto nel piano originale) — che deduplica i comandi ripetuti e rende gli alert
+edge-triggered (solo sulle transizioni), con un rate-limit esplicito per non amplificare un layer
+di regime instabile (flip-flop a monte).
+
+**Valore del rate-limit APPROVATO qui, pre-registrato, non rimandato al momento del deploy:**
+`max_transitions=3` per `window=timedelta(hours=1)`. Le decisioni operative si fissano prima del
+momento in cui contano, non durante — stesso principio già applicato alle soglie di vol (M1.5) e
+alla convenzione UTC (checkpoint 1). Vedi `docs/m2-checkpoint2-wiring-demo-report.md` per la
+dimostrazione empirica su cui questo valore è stato scelto, e l'eventuale report integrativo di
+review per qualunque revisione di questo valore emersa dalla review indipendente del checkpoint 2.

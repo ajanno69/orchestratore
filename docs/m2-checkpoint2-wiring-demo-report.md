@@ -162,11 +162,14 @@ fissata e testata da M2 Task 1: `age > staleness.max_age`, non `>=`), nessuna am
 | t+6m (low-vol, flip #6) | 2026-07-06 12:06:00 | normal | normal | False | normal/normal | - |
 
 **Atteso:** il wiring non amplifica un layer di regime buggato — dopo che le transizioni superano la
-soglia di rate-limit (3 in 1h, valore proposto per questa dimostrazione, da confermare in fase di
-deploy Task 3), i singoli alert LAYER LAVORA vengono soppressi e sostituiti da un unico alert
-aggregato LAYER INSTABILE; i comandi restano deduplicati (un evento per ogni cambio reale di stato,
-mai amplificati). **Osservato:** conforme — su 6 flip, solo 2 alert individuali (i primi, prima che
-il rate-limit scattasse) + 1 aggregato, contro i 6 che si sarebbero avuti senza soppressione.
+soglia di rate-limit (3 in 1h — **valore APPROVATO come pre-registrato al checkpoint 2, vedi
+ADR-037 §9, non più da confermare in fase di deploy**), i singoli alert LAYER LAVORA vengono
+soppressi e sostituiti da un unico alert aggregato LAYER INSTABILE; i comandi restano deduplicati
+(un evento per ogni cambio reale di stato, mai amplificati). **Osservato:** conforme — su 6 flip,
+solo 2 alert individuali (i primi, prima che il rate-limit scattasse) + 1 aggregato, contro i 6 che
+si sarebbero avuti senza soppressione. **Nota aperta dalla review indipendente richiesta da Andrea
+dopo questo report:** cosa succede se il flip-flop continua OLTRE questa finestra — vedi eventuale
+report integrativo di review.
 
 **Chiusura dello script:**
 ```
@@ -198,7 +201,8 @@ completo.
 | Harvester vero (funding-harvester, OKX) che riceve ed esegue `HarvesterCommand` | Nessun executor esiste ancora in questo piano (ADR-037 §7: il wiring produce solo comandi/dati) — è un componente futuro, fuori scope M2 |
 | Persistenza reale dello snapshot da un processo di misura live (qui scritta a mano dallo script) | Già costruito e testato in M1 (Task 8, `regime.store`) — non riverificato qui, solo riusato |
 | Comportamento sotto carico/concorrenza reale (più processi che scrivono/leggono lo stesso file) | Non nello scope di questo checkpoint — nessun deploy multi-processo pianificato per il wiring |
-| Valore reale del rate-limit (`max_transitions=3` in 1h, scelto per questa dimostrazione) | Da confermare/calibrare in fase di deploy con dati reali di frequenza di transizione (Task 3/4) |
+| ~~Valore reale del rate-limit~~ — **chiuso**: `max_transitions=3`/1h approvato come pre-registrato al checkpoint 2 (ADR-037 §9), non più un buco di copertura | n/a |
+| Review indipendente del componente `WiringSequencer` (stateful, nuovo, fuori piano originale, sul percorso capitale) | In corso su richiesta di Andrea dopo la consegna di questo report — vedi eventuale report integrativo di review per l'esito |
 
 ---
 
