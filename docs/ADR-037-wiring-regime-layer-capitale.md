@@ -1,11 +1,12 @@
 # ADR-037 — Wiring del regime layer a capitale (harvester ETH + GridBTC)
 
 **Data:** 2026-07-06
-**Stato:** PROPOSED — non ACCEPTED finché Andrea non supera il checkpoint bloccante sul piano
-(vedi `docs/superpowers/plans/2026-07-06-m2-capital-reactivation-wiring.md`)
+**Stato:** ACCEPTED (2026-07-06) — piano M2 approvato da Andrea, checkpoint 1 ("piano completo")
+superato dopo chiusura del punto sulla convenzione temporale UTC (vedi §3) e formalizzazione del
+gate GridBTC (vedi piano, Task 2). Vedi `docs/superpowers/plans/2026-07-06-m2-capital-reactivation-wiring.md`.
 **Ambito:** M2. Questo ADR è SOLO decisione architetturale — nessuna riga di codice, nessuna chiave,
-nessun deploy viene eseguito con questo documento. L'implementazione (Task 1 del piano M2) segue
-SOLO dopo che questo ADR è ACCEPTED.
+nessun deploy viene eseguito con questo documento. L'implementazione (Task 1 del piano M2) parte
+subito dopo, nel repo, con lo stesso rigore TDD del resto del progetto.
 **Precondizione:** ADR-036 (ACCEPTED 2026-07-05, congelato), M1.5 (soglie vol derivate, vedi
 `docs/regime-threshold-provenance-2026-07.md`).
 
@@ -45,6 +46,18 @@ su dati mancanti è, per costruzione, una scommessa su cosa sta succedendo nel m
 regime layer è cieco — esattamente il tipo di comportamento che ADR-036 vieta per il regime layer
 ("lettura del presente, non scommessa"). Un sistema che non sa se BTC è in high-vol non ha il
 diritto di decidere che probabilmente non lo è (o che probabilmente lo è): deve fermarsi e chiedere.
+
+**Convenzione temporale esplicita per il calcolo di staleness (chiusura checkpoint 1, decisione
+definitiva, non riaprire):** ogni confronto di età tra "ora" e il timestamp dello snapshot è in
+UTC. Un timestamp con offset esplicito va convertito con `astimezone(timezone.utc)` PRIMA di uno
+strip dell'offset — mai un `replace(tzinfo=None)` secco, che ignorerebbe silenziosamente l'offset e
+sbaglierebbe l'età esattamente dell'ampiezza dell'offset scartato (un `now` in fuso CEST scambiato
+per UTC farebbe apparire uno snapshot appena scritto stantio di ~2 ore). "Ora" deve essere
+`datetime.now(timezone.utc)` o un naive-UTC dichiarato esplicitamente per convenzione — **mai
+`datetime.now()` locale nel path di staleness**. Questa non è un dettaglio implementativo: un
+calcolo di staleness sbagliato per un bug di fuso orario produrrebbe silenziosamente l'esatto
+comportamento che questo ADR vieta (un'azione — o una non-azione — basata su un giudizio di
+freschezza dei dati che è semplicemente falso).
 
 ## 4. Harvester ETH in high-vol: modalità difensiva, non chiusura
 
@@ -118,7 +131,10 @@ dei due sistemi lo sa.
   da un canale di notifica funzionante. Il Task 5 del piano (runbook operativo) deve includere
   esplicitamente "come verifico che il canale di alert stesso sia vivo", non solo "cosa faccio
   quando l'alert scatta".
-- **GridBTC §5 resta una decisione aperta**: questo ADR non può essere considerato "chiuso" nel
-  senso di ADR-036 finché quella scelta non è fatta al checkpoint dedicato.
+- **GridBTC §5 resta una decisione aperta anche ad ADR ACCEPTED**: l'accettazione di questo ADR
+  approva l'architettura di wiring (fail-safe, muro per-asset, modalità difensiva harvester,
+  convenzione temporale) — NON la scelta stop-nuovi-ordini vs chiusura ordinata per GridBTC, che
+  resta esplicitamente riservata al checkpoint 2 ("wiring implementato pre-deploy"), informata
+  dalla lettura del codice reale del guard esistente (Task 2 del piano).
 - **Interazione con il guard esistente di GridBTC (§5) non ancora verificata a livello di codice**:
   rischio esplicitamente dichiarato, non silenziosamente assunto risolto.

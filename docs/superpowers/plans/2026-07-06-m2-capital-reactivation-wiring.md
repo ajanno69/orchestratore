@@ -41,6 +41,14 @@ Contabo esistente, systemd, pattern canary/healthcheck già in uso da funding-ha
   wiring produce comandi (dati), non esegue operazioni autenticate.
 - **`D:\Claude\crypto-agent` è un repo isolato, di sola lettura per questo piano** (policy globale:
   "non mischiare mai dati/config/blacklist fra progetti"). Il Task 2 lo legge, non lo modifica mai.
+- **Convenzione temporale ESPLICITA (chiusura del checkpoint 1, non riaprire)**: tutti i confronti
+  di staleness nel Task 1 sono in UTC. Un timestamp aware va convertito con
+  `astimezone(timezone.utc)` PRIMA di un eventuale strip dell'offset — mai un `replace(tzinfo=None)`
+  secco, che ignorerebbe silenziosamente l'offset e sbaglierebbe l'età esattamente dell'ampiezza
+  dell'offset scartato. Un `now` naive è trattato come UTC per convenzione esplicita (stessa
+  convenzione di `regime.store`); un `now` aware va normalizzato con la stessa conversione. **MAI
+  `datetime.now()` locale (senza `timezone.utc`) nel path di staleness** — un caller deve usare
+  `datetime.now(timezone.utc)` o un naive-UTC dichiarato esplicitamente, non un'ambiguità silenziosa.
 - TDD dove il codice è puro e testabile (Task 1); i Task 2-5 sono documenti di analisi/runbook, non
   codice — ciascuno con contenuto completo, non placeholder.
 - Ogni task con codice chiude con suite completa verde (`python -m pytest -v`) + `python -m ruff
@@ -95,7 +103,7 @@ D:\Claude\orchestrator\
 # tests/components/test_regime_wiring.py
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from components.regime_wiring import (
     GridBtcCommand,
@@ -105,7 +113,7 @@ from components.regime_wiring import (
     load_snapshot_safely,
     resolve_wiring_decision,
 )
-from regime.store import RegimeStateStore, build_snapshot
+from regime.store import RegimeSnapshot, RegimeStateStore, build_snapshot
 
 STALENESS = StalenessPolicy(max_age=timedelta(hours=1))
 NOW = datetime(2026, 7, 6, 12, 0, 0)
@@ -214,12 +222,57 @@ def test_load_snapshot_safely_returns_snapshot_when_valid(tmp_path):
 def test_load_snapshot_safely_returns_none_when_no_file(tmp_path):
     store = RegimeStateStore(tmp_path)
     assert load_snapshot_safely(store) is None
+
+
+def test_resolve_wiring_decision_normalizes_aware_non_utc_now_before_staleness_check():
+    """Test dedicato che fallisce con il bug (verificato per davvero: con
+    uno strip secco `replace(tzinfo=None)` senza `astimezone` prima, questo
+    test fallisce con età 2:00:00 invece di ~0). Un `now` aware in un fuso
+    non-UTC (qui CEST, +02:00) che rappresenta LO STESSO istante reale
+    dello snapshot deve dare staleness ~0, non ~2h. Soglia di staleness
+    volutamente stretta (5 minuti) per distinguere inequivocabilmente i
+    due esiti: un errore di 2h farebbe scattare NO_ACTION_STALE_DATA, la
+    normalizzazione corretta no."""
+    tight_staleness = StalenessPolicy(max_age=timedelta(minutes=5))
+    snapshot = build_snapshot(False, False, False, now=datetime(2026, 7, 6, 10, 0, 0))  # 10:00 UTC
+    now_cest_same_instant = datetime(2026, 7, 6, 12, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+    decision = resolve_wiring_decision(
+        snapshot,
+        now=now_cest_same_instant,
+        staleness=tight_staleness,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+    assert decision.harvester_command != HarvesterCommand.NO_ACTION_STALE_DATA
+
+
+def test_resolve_wiring_decision_converts_explicit_non_z_offset_in_snapshot_timestamp():
+    """Snapshot con timestamp che ha un offset esplicito +02:00 (non il
+    solito 'Z' emesso da build_snapshot) — prova che astimezone(utc)
+    applica la conversione giusta invece di leggere l'offset come se
+    fosse già UTC (che sbaglierebbe l'età di esattamente 2h)."""
+    tight_staleness = StalenessPolicy(max_age=timedelta(minutes=5))
+    snapshot = RegimeSnapshot(
+        timestamp="2026-07-06T14:00:00+02:00",  # = 12:00 UTC
+        btc_high_vol=False,
+        eth_high_vol=False,
+        eth_harvester_on=False,
+    )
+    now_utc_same_instant = datetime(2026, 7, 6, 12, 0, 0)
+    decision = resolve_wiring_decision(
+        snapshot,
+        now=now_utc_same_instant,
+        staleness=tight_staleness,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+    assert decision.harvester_command != HarvesterCommand.NO_ACTION_STALE_DATA
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `cd D:/Claude/orchestrator && python -m pytest tests/components/test_regime_wiring.py -v`
-Expected: FAIL with `ModuleNotFoundError: No module named 'components.regime_wiring'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'components.regime_wiring'` (o, se il
+modulo esiste già ma con lo strip secco anziché `astimezone`, i due test sulla convenzione UTC
+falliscono da soli con un'età sbagliata di ~2h — verificato per davvero prima di questa consegna).
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -242,7 +295,7 @@ un'eccezione che fermerebbe il loop di wiring senza generare alert."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 from regime.store import RegimeSnapshot, RegimeStateStore
@@ -285,6 +338,29 @@ class WiringDecision:
     reason: str
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    """Normalizza un datetime a naive-UTC per il confronto di staleness.
+    Se `dt` è aware, converte prima a UTC (`astimezone`) e SOLO DOPO
+    scarta l'offset — mai uno strip secco (`replace(tzinfo=None)` senza
+    conversione), che ignorerebbe silenziosamente l'offset e produrrebbe
+    un'età sbagliata esattamente dell'ampiezza dell'offset scartato
+    (bug reale trovato e chiuso durante la review del checkpoint 1: una
+    versione precedente di questo modulo faceva lo strip secco, innocuo
+    SOLO perché ogni timestamp prodotto da `regime.store` finisce sempre
+    in 'Z'/+00:00, ma silenziosamente sbagliato per qualunque altro
+    offset o per un `now` aware non-UTC — verificato per davvero: con lo
+    strip secco, un `now` in CEST (+02:00) alla stessa ora reale di uno
+    snapshot appena scritto risultava stantio di 2 ore invece di ~0).
+    Se `dt` è naive, è già trattato come UTC per convenzione esplicita di
+    questo modulo (stessa convenzione di `regime.store`) — **mai un
+    datetime locale naive** (es. `datetime.now()` senza `timezone.utc`)
+    deve arrivare qui: il chiamante è responsabile di passare
+    `datetime.now(timezone.utc)` o un naive-UTC dichiarato esplicitamente."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def resolve_wiring_decision(
     snapshot: RegimeSnapshot | None,
     now: datetime,
@@ -299,15 +375,9 @@ def resolve_wiring_decision(
             reason="nessuno snapshot di regime mai scritto: nessuna azione automatica, posizione mantenuta.",
         )
 
-    # .replace(tzinfo=None): il timestamp finisce sempre in "Z" (UTC), che
-    # fromisoformat legge come timezone-aware; il resto del codebase (incl.
-    # `now` qui e in tutti i test di regime.store) usa datetime naive con
-    # UTC implicito per convenzione — normalizziamo a naive per restare
-    # confrontabili senza richiedere che ogni chiamante passi un `now`
-    # esplicitamente aware (che romperebbe con `now - snapshot_time`:
-    # "can't subtract offset-naive and offset-aware datetimes").
-    snapshot_time = datetime.fromisoformat(snapshot.timestamp).replace(tzinfo=None)
-    age = now - snapshot_time
+    now_utc = _to_naive_utc(now)
+    snapshot_time_utc = _to_naive_utc(datetime.fromisoformat(snapshot.timestamp))
+    age = now_utc - snapshot_time_utc
     if age > staleness.max_age:
         return WiringDecision(
             harvester_command=HarvesterCommand.NO_ACTION_STALE_DATA,
@@ -359,11 +429,11 @@ def load_snapshot_safely(store: RegimeStateStore) -> RegimeSnapshot | None:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `cd D:/Claude/orchestrator && python -m pytest tests/components/test_regime_wiring.py -v`
-Expected: PASS (13 test)
+Expected: PASS (15 test)
 
 - [ ] **Step 5: Full suite + ruff**
 
-Run: `cd D:/Claude/orchestrator && python -m pytest -v` — expected: 76 precedenti + 13 nuovi = 89 passing.
+Run: `cd D:/Claude/orchestrator && python -m pytest -v` — expected: 76 precedenti + 15 nuovi = 91 passing.
 Run: `cd D:/Claude/orchestrator && python -m ruff check src tests scripts` — expected: `All checks passed!`
 
 - [ ] **Step 6: Commit**
@@ -382,13 +452,19 @@ git commit -m "feat: componente di wiring regime->comandi harvester/GridBTC (M2)
 **Files:**
 - Create: `docs/gridbtc-highvol-analysis-m2.md`
 
-**Prerequisito obbligatorio (ADR-037 §5):** prima di scrivere questo documento, leggere il codice
-reale del guard esistente di GridBTC in `D:\Claude\crypto-agent\agent\v2\risk\engine.py` e file
-correlati (`agent/v2/orchestrator_hooks.py`, `agent/v2/shadow.py`) — SOLA LETTURA, nessuna modifica
-a quel repo. Questo piano non ha verificato quel codice riga per riga; lo ha solo censito a livello
-di changelog (`past project/02_crypto-agent.md`: guard basato su HAR-RV + VPVR + Anchored VWAP,
+**GATE FORMALE, BLOCCANTE (ADR-037 §5 + chiusura checkpoint 1) — non scrivere la sezione
+"Raccomandazione" del documento prima di aver superato questo gate:**
+
+Prima di scrivere qualunque raccomandazione definitiva, leggere il codice reale del guard
+esistente di GridBTC in `D:\Claude\crypto-agent\agent\v2\risk\engine.py` e file correlati
+(`agent/v2/orchestrator_hooks.py`, `agent/v2/shadow.py`) — SOLA LETTURA, nessuna modifica a quel
+repo. Questo piano NON ha verificato quel codice riga per riga; lo ha solo censito a livello di
+changelog (`past project/02_crypto-agent.md`: guard basato su HAR-RV + VPVR + Anchored VWAP,
 promosso shadow→HARD il 2026-05-16). Il documento di analisi deve iniziare dichiarando cosa quel
-guard fa OGGI, prima di proporre come il nuovo segnale di regime debba interagirci.
+guard fa OGGI (soglie, azione, meccanismo) — con citazione di file:riga del codice reale letto, non
+del changelog — prima di proporre come il nuovo segnale di regime debba interagirci. Se questa
+lettura non è stata fatta, il documento resta allo stato di "raccomandazione preliminare" (già
+presente in questo piano) e NON può essere promosso a raccomandazione definitiva al checkpoint 2.
 
 - [ ] **Step 1: Scrivere il documento con questa struttura minima**
 
