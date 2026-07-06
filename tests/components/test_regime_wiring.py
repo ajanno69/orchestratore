@@ -176,6 +176,50 @@ def test_resolve_wiring_decision_normalizes_aware_non_utc_now_before_staleness_c
     assert decision.harvester_command != HarvesterCommand.NO_ACTION_STALE_DATA
 
 
+def test_resolve_wiring_decision_fails_safe_on_malformed_timestamp():
+    """Uno snapshot con JSON valido ma timestamp non ISO (i dataclass non
+    validano i tipi/contenuto a runtime, quindi `RegimeSnapshot.from_dict`
+    lo costruisce comunque) non deve far esplodere `resolve_wiring_decision`
+    con un'eccezione non gestita — deve fermarsi allo stesso fail-safe
+    NO_ACTION_STALE_DATA + alert usato per snapshot assente/stantio."""
+    snapshot = RegimeSnapshot(
+        timestamp="non-una-data-iso",
+        btc_high_vol=False,
+        eth_high_vol=False,
+        eth_harvester_on=False,
+    )
+    decision = resolve_wiring_decision(
+        snapshot,
+        now=NOW,
+        staleness=STALENESS,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+    assert decision.harvester_command == HarvesterCommand.NO_ACTION_STALE_DATA
+    assert decision.gridbtc_command == GridBtcCommand.NO_ACTION_STALE_DATA
+    assert decision.alert is True
+
+
+def test_resolve_wiring_decision_fails_safe_on_non_bool_field():
+    """Un campo booleano con un tipo invalido (qui una stringa) non deve
+    essere interpretato per truthiness (mai un default silenzioso) — deve
+    produrre lo stesso fail-safe di uno snapshot assente."""
+    snapshot = RegimeSnapshot(
+        timestamp="2026-07-06T12:00:00Z",
+        btc_high_vol="true",  # invalido: stringa, non bool
+        eth_high_vol=False,
+        eth_harvester_on=False,
+    )
+    decision = resolve_wiring_decision(
+        snapshot,
+        now=NOW,
+        staleness=STALENESS,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+    assert decision.harvester_command == HarvesterCommand.NO_ACTION_STALE_DATA
+    assert decision.gridbtc_command == GridBtcCommand.NO_ACTION_STALE_DATA
+    assert decision.alert is True
+
+
 def test_resolve_wiring_decision_converts_explicit_non_z_offset_in_snapshot_timestamp():
     """Snapshot con timestamp che ha un offset esplicito +02:00 (non il
     solito 'Z' emesso da build_snapshot) — prova che astimezone(utc)

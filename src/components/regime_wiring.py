@@ -81,6 +81,36 @@ def _to_naive_utc(dt: datetime) -> datetime:
     return dt
 
 
+def _parse_timestamp_or_none(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _malformed_snapshot_reason(snapshot: RegimeSnapshot) -> str | None:
+    """Ritorna una descrizione del difetto se lo snapshot ha campi
+    semanticamente invalidi pur essendo stato costruito con successo — un
+    `dataclass` non valida i tipi a runtime, quindi un JSON con
+    `"btc_high_vol": "true"` (stringa) o un timestamp non-ISO costruisce
+    comunque un `RegimeSnapshot`, senza sollevare nulla. Senza questo
+    controllo esplicito, un campo booleano invalido verrebbe interpretato
+    per truthiness (un default silenzioso vietato dalla convenzione di
+    questo modulo) e un timestamp non parsabile farebbe esplodere il
+    confronto di staleness con un'eccezione non gestita — l'opposto del
+    fail-safe che questo livello deve garantire."""
+    if _parse_timestamp_or_none(snapshot.timestamp) is None:
+        return f"timestamp non valido: {snapshot.timestamp!r}"
+    for field_name, value in (
+        ("btc_high_vol", snapshot.btc_high_vol),
+        ("eth_high_vol", snapshot.eth_high_vol),
+        ("eth_harvester_on", snapshot.eth_harvester_on),
+    ):
+        if not isinstance(value, bool):
+            return f"campo booleano invalido: {field_name}={value!r}"
+    return None
+
+
 def resolve_wiring_decision(
     snapshot: RegimeSnapshot | None,
     now: datetime,
@@ -98,8 +128,20 @@ def resolve_wiring_decision(
             ),
         )
 
+    malformed_reason = _malformed_snapshot_reason(snapshot)
+    if malformed_reason is not None:
+        return WiringDecision(
+            harvester_command=HarvesterCommand.NO_ACTION_STALE_DATA,
+            gridbtc_command=GridBtcCommand.NO_ACTION_STALE_DATA,
+            alert=True,
+            reason=(
+                f"snapshot con dati invalidi ({malformed_reason}): nessuna "
+                "azione automatica, posizione mantenuta."
+            ),
+        )
+
     now_utc = _to_naive_utc(now)
-    snapshot_time_utc = _to_naive_utc(datetime.fromisoformat(snapshot.timestamp))
+    snapshot_time_utc = _to_naive_utc(_parse_timestamp_or_none(snapshot.timestamp))
     age = now_utc - snapshot_time_utc
     if age > staleness.max_age:
         return WiringDecision(
