@@ -157,7 +157,7 @@ fissata e testata da M2 Task 1: `age > staleness.max_age`, non `>=`), nessuna am
 | t+1m (high-vol, flip #1) | 2026-07-06 12:01:00 | defensive | normal | True | defensive/normal | [layer_lavora_difensiva] LAYER LAVORA — snapshot valido, comandi derivati dallo stato di regime corrente. |
 | t+2m (low-vol, flip #2) | 2026-07-06 12:02:00 | normal | normal | False | normal/normal | [layer_lavora_rientro] LAYER LAVORA — ETH rientrato in low-vol: NESSUNA ripresa automatica, conferma manuale richiesta prima di uscire dalla modalità difensiva (ADR-037: la ripresa è decisione umana). |
 | t+3m (high-vol, flip #3) | 2026-07-06 12:03:00 | defensive | normal | True | defensive/normal | [layer_lavora_difensiva] LAYER LAVORA — snapshot valido, comandi derivati dallo stato di regime corrente. |
-| t+4m (low-vol, flip #4) | 2026-07-06 12:04:00 | normal | normal | False | normal/normal | [layer_instabile] LAYER INSTABILE — 4 transizioni di stato in 1:00:00: possibile flip-flop a monte (layer di regime instabile o dati rumorosi), alert individuali soppressi finché la frequenza non si stabilizza sotto soglia. |
+| t+4m (low-vol, flip #4) | 2026-07-06 12:04:00 | normal | normal | False | normal/normal | [layer_instabile] LAYER INSTABILE — 4 transizioni di stato in 1:00:00: possibile flip-flop a monte (layer di regime instabile o dati rumorosi). Alert individuali soppressi mentre l'instabilità persiste; questo è un promemoria periodico (ogni 1:00:00), non un singolo evento — resta attivo finché le transizioni non rientrano sotto soglia. |
 | t+5m (high-vol, flip #5) | 2026-07-06 12:05:00 | defensive | normal | True | defensive/normal | - |
 | t+6m (low-vol, flip #6) | 2026-07-06 12:06:00 | normal | normal | False | normal/normal | - |
 

@@ -114,6 +114,88 @@ def test_blind_alert_layer_cieco_text_distinct_from_lavora():
     assert "LAYER LAVORA" not in text
 
 
+def test_layer_instabile_reminder_refires_during_prolonged_flip_flop():
+    """Finding review indipendente checkpoint 2 (b): un flip-flop che
+    continua OLTRE la prima finestra di rate-limit non deve produrre
+    silenzio totale — l'operatore deve ricevere un promemoria periodico
+    (stessa cadenza della finestra) finché l'instabilità persiste, non un
+    solo alert seguito da nessun altro segnale per ore."""
+    seq = _sequencer()  # window=1h, max_transitions=3
+    seq.process(_decision(harvester=HarvesterCommand.NORMAL), now=T0)
+    all_alerts = []
+    t = T0
+    for i in range(72):  # 6 ore di flip ogni 5 minuti: ben oltre la prima finestra
+        t = t + timedelta(minutes=5)
+        cmd = HarvesterCommand.DEFENSIVE if i % 2 == 0 else HarvesterCommand.NORMAL
+        out = seq.process(
+            _decision(harvester=cmd, alert=(cmd == HarvesterCommand.DEFENSIVE)), now=t
+        )
+        all_alerts.extend(out.alerts)
+
+    aggregate_alerts = [a for a in all_alerts if a.category == AlertCategory.LAYER_INSTABILE]
+    assert len(aggregate_alerts) >= 3, (
+        f"atteso almeno un promemoria per ognuna delle ~5 finestre successive alla prima, "
+        f"osservato {len(aggregate_alerts)} — il flip-flop prolungato produce silenzio"
+    )
+
+
+def test_layer_instabile_rearms_after_stabilization_then_new_storm():
+    """Finding review indipendente checkpoint 2 (b): dopo che una tempesta
+    di flip-flop si stabilizza, una NUOVA tempesta successiva deve
+    riarmare l'alert aggregato — non deve restare disarmato per sempre
+    dopo la prima."""
+    seq = _sequencer()  # window=1h, max_transitions=3
+    seq.process(_decision(harvester=HarvesterCommand.NORMAL), now=T0)
+
+    t = T0
+    first_storm_alerts = []
+    for i in range(6):
+        t = t + timedelta(minutes=1)
+        cmd = HarvesterCommand.DEFENSIVE if i % 2 == 0 else HarvesterCommand.NORMAL
+        out = seq.process(
+            _decision(harvester=cmd, alert=(cmd == HarvesterCommand.DEFENSIVE)), now=t
+        )
+        first_storm_alerts.extend(out.alerts)
+    assert any(a.category == AlertCategory.LAYER_INSTABILE for a in first_storm_alerts)
+
+    # stabilizzazione: molti tick FERMI (nessun cambio di categoria) distanziati
+    # su >1h, cosi' tutte le transizioni escono dalla finestra di rate-limit
+    # senza che nessun tick generi esso stesso una nuova transizione (altrimenti
+    # si rischia di far scattare per caso il ramo "else" del codice bacato,
+    # mascherando il bug invece di verificarlo)
+    for minutes in (10, 30, 50, 70, 90, 130):
+        t = t + timedelta(minutes=minutes)
+        seq.process(_decision(harvester=HarvesterCommand.NORMAL), now=t)
+
+    second_storm_alerts = []
+    for i in range(6):
+        t = t + timedelta(minutes=1)
+        cmd = HarvesterCommand.DEFENSIVE if i % 2 == 0 else HarvesterCommand.NORMAL
+        out = seq.process(
+            _decision(harvester=cmd, alert=(cmd == HarvesterCommand.DEFENSIVE)), now=t
+        )
+        second_storm_alerts.extend(out.alerts)
+
+    assert any(a.category == AlertCategory.LAYER_INSTABILE for a in second_storm_alerts), (
+        "la seconda tempesta non ha riarmato l'alert LAYER_INSTABILE dopo la stabilizzazione"
+    )
+
+
+def test_sequencer_reemits_current_state_on_fresh_instance_simulating_restart():
+    """Contratto di riavvio (finding review indipendente checkpoint 2, a):
+    lo stato di dedup è in-memory ed effimero. Una nuova istanza (come
+    dopo un restart del processo) deve riemettere comando E alert dello
+    stato corrente al primo tick, anche se quello stato "di fatto" non è
+    appena cambiato — sicuro solo perché i comandi sono level-triggered
+    (ridichiarano uno stato, non eseguono un'azione one-shot)."""
+    seq = _sequencer()
+    out = seq.process(_decision(harvester=HarvesterCommand.DEFENSIVE, alert=True), now=T0)
+    assert len(out.commands) == 1
+    assert out.commands[0].harvester_command == HarvesterCommand.DEFENSIVE
+    assert len(out.alerts) == 1
+    assert out.alerts[0].category == AlertCategory.LAYER_LAVORA_DIFENSIVA
+
+
 def test_rate_limit_aggregates_rapid_flip_flop_alerts():
     seq = _sequencer()  # max_transitions=3 in finestra 1h
     seq.process(_decision(harvester=HarvesterCommand.NORMAL), now=T0)
