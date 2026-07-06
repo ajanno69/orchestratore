@@ -10,6 +10,17 @@ subito dopo, nel repo, con lo stesso rigore TDD del resto del progetto.
 **Precondizione:** ADR-036 (ACCEPTED 2026-07-05, congelato), M1.5 (soglie vol derivate, vedi
 `docs/regime-threshold-provenance-2026-07.md`).
 
+**Emendamento 2026-07-06 (ground truth Andrea, dopo Task 2):** §5 e §6 di questo documento
+affermavano che GridBTC fosse "già promosso HARD" con capitale reale esposto (2026-05-16, secondo
+`past project/02_crypto-agent.md`). Ground truth di Andrea: **GridBTC è stato SOLO shadow, mai
+capitale esposto, né allora né ora.** Questo è coerente con il finding forense del Task 2
+(`docs/gridbtc-highvol-analysis-m2.md`): nessun `bot_grid_btc` è mai comparso nel contenuto di
+`docker-compose.yml` in tutta la storia tracciata del repo crypto-agent. §5 e §6 sono riscritti di
+conseguenza: non esiste una "riattivazione" di GridBTC da pianificare, esiste una **prima
+attivazione**, senza nessuna eredità di fiducia dallo stato shadow pregresso — stesso protocollo
+dell'harvester (shadow → criteri di promozione espliciti → gate G3), non un protocollo diverso e
+più permissivo giustificato da un "già in produzione" che non è mai stato vero.
+
 ---
 
 ## 1. Perché questo ADR
@@ -85,35 +96,48 @@ vol può erodere via requisiti di mantenimento più alti — da cui il check mar
 rischio reale in high-vol non è la posizione esistente, è aggiungerne di nuove in un momento di
 maggiore incertezza sui costi di esecuzione/slippage.
 
-## 5. GridBTC in high-vol BTC: analisi e raccomandazione (decisione al checkpoint)
+## 5. GridBTC in high-vol BTC: analisi e raccomandazione (decisione al gate di promozione)
 
-**Questa è l'unica decisione di questo ADR che NON è ancora presa.** Il piano M2 (Task 2) presenta
-l'analisi comparativa stop-nuovi-ordini vs chiusura ordinata della griglia, con una raccomandazione
-motivata — ma la scelta finale è esplicitamente riservata al checkpoint "wiring implementato
-pre-deploy" (vedi piano, non a questo ADR e non al codice). Il codice del wiring (Task 1) espone
-questa scelta come un parametro esplicito e obbligatorio, senza un default cablato: nessun valore
-verrà scelto per omissione.
+**Emendata 2026-07-06.** Il testo originale di questa sezione affermava che GridBTC avesse "già un
+proprio meccanismo di guardia interno, promosso da shadow a HARD il 2026-05-16" e trattava questa
+sezione come "l'unica decisione di questo ADR non ancora presa" nel senso di una scelta operativa
+su un sistema già live. **Ground truth di Andrea (2026-07-06): falso — GridBTC è stato SOLO
+shadow, mai capitale esposto, né allora né ora.** Il finding forense del Task 2
+(`docs/gridbtc-highvol-analysis-m2.md`, coda forense) conferma: nessun `bot_grid_btc` è mai
+comparso nel contenuto tracciato di `infra/docker-compose.yml` in tutta la storia del repo
+crypto-agent (verificato con `git log --follow`), né in nessun altro file di config o codice. La
+frase "promosso HARD" vive solo nel changelog narrativo (`past project/02_crypto-agent.md`) e in
+un'affermazione non verificata di `docs/DECOMMISSION-2026-07.md` (2026-07-05) — mai nel codice
+reale.
 
-**Vincolo noto e dichiarato qui:** GridBTC ha già un proprio meccanismo di guardia interno
-(promosso da shadow a HARD il 2026-05-16, secondo `past project/02_crypto-agent.md`), basato su
-realized volatility HAR-RV, VPVR e Anchored VWAP ("impulse detector"). Questo ADR **non ha
-verificato il codice esatto di quel guard** (vive in `D:\Claude\crypto-agent`, un repo isolato per
-policy — vedi CLAUDE.md globale, "non mischiare mai dati/config/blacklist fra progetti"). Il Task 2
-del piano M2 **deve** iniziare con la lettura di quel codice (non di questo ADR) prima di
-raccomandare qualunque azione, per evitare due esiti entrambi pericolosi: (a) il nuovo segnale di
-regime duplica una protezione che GridBTC ha già, aggiungendo complessità senza beneficio; (b) il
-nuovo segnale e il guard esistente danno indicazioni contrastanti nello stesso momento, e nessuno
-dei due sistemi lo sa.
+**Conseguenza:** non c'è nessun meccanismo di guardia esistente con cui il wiring debba
+coordinarsi oggi, perché non c'è nessun GridBTC live oggi. L'analisi comparativa stop-nuovi-ordini
+vs chiusura ordinata (Task 2) resta valida come base di ragionamento generale su qualunque bot a
+griglia Freqtrade in high-vol, ma la sua raccomandazione è esplicitamente **condizionale**: si
+applica quando/se GridBTC verrà ricostruito e rientrerà in shadow, non ora. La scelta finale del
+parametro `GridBtcHighVolAction` (Task 1, nessun default cablato) resta riservata a un checkpoint
+umano, ma quel checkpoint è ora il **gate di promozione di GridBTC** (§6, `docs/m2-reactivation-gates.md`),
+non un "wiring implementato pre-deploy" pensato per un sistema già in produzione.
 
-## 6. Ordine di riattivazione
+## 6. Ordine di attivazione (harvester prima; GridBTC: prima attivazione, non riattivazione)
+
+**Emendata 2026-07-06.** Non esiste una "riattivazione" di GridBTC da pianificare: non è mai stato
+attivo con capitale, quindi non c'è nulla da riattivare. Esiste una **prima attivazione**, futura e
+non ancora programmata, che **non eredita nessuna fiducia dallo stato shadow pregresso** — il fatto
+che una versione precedente di GridBTC sia arrivata in shadow nel 2026-05 non esenta la versione
+futura dal rifare l'intera trafila da zero. Questo allinea i due componenti a un **protocollo
+unico**, non a due protocolli diversi giustificati da uno stato di maturità che per GridBTC non è
+mai esistito:
 
 1. **Harvester (gate G3, ETH-only)** — già pendente indipendentemente da questo ADR (vedi
    `past project/03_newcrypto-funding-harvester.md`, gate G3 ≤$100 USDT). Il wiring regime→harvester
    entra come precondizione aggiuntiva al gate esistente, non lo sostituisce.
-2. **GridBTC** — dopo l'harvester, non in parallelo. GridBTC è già "promosso HARD" (produzione, su
-   capitale dedicato) — il wiring qui non è un'attivazione da zero ma un'aggiunta di prudenza a un
-   sistema già live. Proprio per questo va per ultimo: è il sistema con più capitale reale già
-   esposto, quindi il sistema su cui un errore di wiring costerebbe di più.
+2. **GridBTC** — dopo l'harvester, non in parallelo, e comunque non prima che esista di nuovo un
+   bot GridBTC reale da mettere in shadow (oggi non esiste, vedi Task 2). Quando esisterà, segue
+   **esattamente lo stesso protocollo dell'harvester**: shadow → criteri di promozione espliciti →
+   gate G3 (vedi `docs/m2-reactivation-gates.md`, protocollo unificato) — non un protocollo a sé
+   con una durata di shadow più lunga giustificata da "capitale già esposto", perché quel capitale
+   non è mai stato esposto.
 
 ## 7. Chiavi
 
@@ -134,7 +158,18 @@ dei due sistemi lo sa.
 - **GridBTC §5 resta una decisione aperta anche ad ADR ACCEPTED**: l'accettazione di questo ADR
   approva l'architettura di wiring (fail-safe, muro per-asset, modalità difensiva harvester,
   convenzione temporale) — NON la scelta stop-nuovi-ordini vs chiusura ordinata per GridBTC, che
-  resta esplicitamente riservata al checkpoint 2 ("wiring implementato pre-deploy"), informata
-  dalla lettura del codice reale del guard esistente (Task 2 del piano).
-- **Interazione con il guard esistente di GridBTC (§5) non ancora verificata a livello di codice**:
-  rischio esplicitamente dichiarato, non silenziosamente assunto risolto.
+  resta esplicitamente riservata al gate di promozione di GridBTC (§6, `docs/m2-reactivation-gates.md`),
+  condizionale all'esistenza futura di un bot GridBTC reale in shadow.
+- **Emendamento 2026-07-06**: il rischio originariamente dichiarato qui ("interazione con il guard
+  esistente di GridBTC non ancora verificata a livello di codice") presupponeva che un guard
+  esistente ci fosse. Il finding forense del Task 2 mostra che non c'è — quindi il rischio reale
+  non è "un'interazione non verificata con un guard esistente", ma un rischio diverso e più
+  generale: **una futura ricostruzione di GridBTC potrebbe re-introdurre un guard proprio senza che
+  questo ADR/wiring lo sappia.** Il gate di promozione (`docs/m2-reactivation-gates.md`) deve
+  quindi verificare l'esistenza di un guard **al momento**, non fidarsi del changelog storico né di
+  questo ADR.
+- **Igiene documentale (finding del Task 2, coda forense)**: `docs/DECOMMISSION-2026-07.md`
+  (crypto-agent, 2026-07-05) conteneva un'affermazione "verificato che X" non riscontrabile contro
+  il contenuto reale del file citato. Regola che ne esce, valida anche per questo repo: ogni
+  affermazione "verificato X" in un documento deve includere comando eseguito + output osservato,
+  mai una prosa non falsificabile.

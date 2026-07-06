@@ -66,6 +66,14 @@ niente" pigro ma una conclusione basata su verifica multipla e incrociata.
 9. **`docs/park/*.md`** (doc di parcheggio per bot dismessi, es. `bot_bonk_btc_dca-2026-07.md`,
    `bot_dca_rotator-2026-07.md`): nessun equivalente per GridBTC.
 
+**Ground truth di Andrea (2026-07-06, dopo la prima consegna di questa analisi): GridBTC è stato
+SOLO shadow, mai capitale esposto, né allora né ora.** Questo risolve in via definitiva
+l'incertezza lasciata aperta nella prima versione di questo documento (che non poteva escludere
+che GridBTC girasse fuori da questo repo con capitale reale, senza tracciamento in
+`docker-compose.yml`). Non è più un'ipotesi da verificare: non c'è nessun bot GridBTC live da
+proteggere, oggi. Vedi anche l'emendamento corrispondente in
+`docs/ADR-037-wiring-regime-layer-capitale.md` §5-6.
+
 ### Conclusione del finding
 
 Il guard descritto (HAR-RV + VPVR + Anchored VWAP, "impulse detector", promosso HARD il
@@ -77,16 +85,80 @@ il contenuto reale del file alla stessa data — non è chiaro se la verifica si
 file diverso, se il servizio fosse gestito fuori da questo docker-compose (es. processo manuale
 sul VPS mai committato), o se l'affermazione fosse semplicemente imprecisa.
 
-**Non è possibile determinare, da questo repo, quale di queste ipotesi sia corretta.** Questo
-supera lo scope di un'analisi in sola lettura sul codice: è una domanda sullo stato operativo reale
-del VPS Contabo, che solo Andrea può risolvere (es. verificando direttamente `docker ps -a` sul VPS,
-o la sua memoria di dove gira/girava GridBTC se non in questo docker-compose).
+**Aggiornamento post ground-truth:** la domanda "quale di queste ipotesi è corretta" è stata
+risolta direttamente da Andrea (non deducibile dal solo repo): GridBTC non ha mai avuto capitale
+esposto, in nessun momento — quindi non gira, e non è mai girato, "fuori da questo docker-compose
+con capitale reale". L'affermazione nel `DECOMMISSION-2026-07.md` resta comunque un'imprecisione
+documentale reale (vedi coda forense sotto), solo non più un mistero operativo urgente.
 
-**Implicazione diretta per il gate:** non posso scrivere una raccomandazione definitiva
-stop-vs-chiusura ancorata al comportamento di un guard che non ho potuto leggere. Le sezioni 1-4
-sotto rispondono comunque alle domande poste, ma come **analisi condizionale e generale** (valida
-per qualunque bot a griglia su Freqtrade in high-vol), non come lettura di un meccanismo verificato
-riga per riga. La raccomandazione finale (§5) riflette questa distinzione esplicitamente.
+**Implicazione per il gate:** non è possibile scrivere una raccomandazione definitiva
+stop-vs-chiusura ancorata al comportamento di un guard che non esiste. Le sezioni 1-4 sotto
+rispondono comunque alle domande poste, come **analisi condizionale e generale** (valida per
+qualunque bot a griglia su Freqtrade in high-vol, applicabile quando/se GridBTC verrà
+ricostruito), non come lettura di un meccanismo verificato riga per riga. La raccomandazione
+finale (§5) riflette questa distinzione esplicitamente.
+
+### Coda forense (2026-07-06): origine dell'affermazione non verificabile in DECOMMISSION-2026-07.md
+
+Su richiesta di Andrea, verifica di igiene documentale (non più urgenza di capitale, essendo
+chiarito che GridBTC non ha mai avuto capitale esposto) su dove e quando è nata l'affermazione
+"verificato che `docker-compose.yml` avesse ancora la definizione di `bot_grid_btc`... intatta".
+
+**Comando eseguito:**
+```
+cd D:/Claude/crypto-agent && git log --follow --oneline -- infra/docker-compose.yml
+cd D:/Claude/crypto-agent && git log --follow --oneline -- docs/DECOMMISSION-2026-07.md
+```
+
+**Output (docker-compose.yml, 17 commit dall'inizio repo, mai rinominato):**
+```
+885a100 fix(infra): pin cloudflared to 2025.8.1 (2026.3.0 causes tunnel-wide 502)
+3de2e2f fix(infra): cloudflared --protocol http2 (avoid QUIC UDP buffer drops causing 502)
+76a79f4 fix(infra): cloudflared --token via compose substitution + infra/.env symlink
+e68ca7d fix(infra): cloudflared token via shell wrapper (compose substitution fails)
+bcef787 fix(infra): cloudflared uses --token CLI flag (2026.3.0 ignores env var)
+6a9c8d5 fix(infra): persist user_data:ro mount on agent service
+ce50cbb chore(lint): fix 237 ruff warnings + tighten config
+9533808 feat(bench): RsiBbHybrid15m-TP15 — A/B benchmark wider TP per letitride sim
+d0d012e feat(infra): add 5 new bot configs (Donch1h, KP-15m, KP-B, MLE-4h, RsiBb-15m) + claude_settings + Dockerfile updates
+d79de2a feat(sprint1): drift monitor (river ADWIN) + state volume regime_detector
+4f81b2d feat(sprint1): RegimeDetector AI service — LightGBM 8-class + FastAPI
+a9d5323 feat(sprint0): bridge orchestrator + gate eval + deploy scripts + docker services + bug fix hyperopt cleanup
+e44bb26 feat(infra): Postgres 16 + schema-per-bot + notify_user.sh
+3f906f1 feat: migrate agent to Claude CLI OAuth (Max plan) + fix APScheduler bug
+e5d16d4 Save BotSnapshot on each cycle, fix VPS health via docker.sock, drop SSH dependency
+b28fdd3 Add host-gateway for Freqtrade connectivity from Docker containers
+c5aee76 Fix Docker build errors, TypeScript config, and optional Kraken credentials
+4a3b7ad Initial scaffold: agent SDK + React dashboard + Docker infra
+```
+Identico all'elenco ottenuto con `git log` semplice (§0.8) — conferma che il file non è mai stato
+rinominato/spostato: la sua storia è completa, non tronca per un rename non seguito.
+
+**Output (DECOMMISSION-2026-07.md, 2 commit):**
+```
+0d2afde chore(fleet): final decommission pass — funding-harvester canary, mft_engine, container prune
+9e06127 chore(fleet): park dry-run bots and stop dashboard/tunnel for ADR-036 decommission
+```
+
+Verificato il contenuto di entrambi i commit (`git show <hash>`): il primo commit (`9e06127`,
+2026-07-05 18:25:56+02:00) **non contiene nessuna menzione di "grid"**, in nessuna forma, né nel
+messaggio né nel diff. L'affermazione "verificato che `bot_grid_btc`... intatta" compare
+**esclusivamente** nel secondo commit (`0d2afde`, 2026-07-05 19:27:07+02:00, il commit finale di
+decommissioning), sia nel messaggio di commit sia nel corpo del documento aggiunto in quel diff.
+
+**Conclusione della coda forense:** l'affermazione è stata scritta in un'unica occasione precisa
+(quel commit), senza un comando/output allegato che la sostenga — e il contenuto reale del file
+che dichiara di aver verificato (`docker-compose.yml`) non la conferma (§0.8). Non è possibile,
+da qui, distinguere se sia stato un controllo fatto su un file/percorso diverso da quello citato,
+o un'affermazione scritta senza eseguire davvero il comando di verifica — ma la distinzione non
+cambia la regola che ne esce.
+
+**Regola che ne esce (da applicare anche in questo repo, non solo raccomandata a crypto-agent):**
+ogni affermazione "verificato X" in un documento deve riportare il comando eseguito e l'output
+osservato, non solo la conclusione in prosa. Una frase come "verificato che il file contenesse Y"
+senza il comando+output allegato non è distinguibile, a posteriori, da un'affermazione mai
+verificata — esattamente il problema che questa coda forense ha dovuto ricostruire a ritroso
+invece di poter semplicemente leggere.
 
 ---
 
@@ -193,32 +265,36 @@ un'operazione umana esplicita (riattivare `stopbuy` o ricreare la griglia via
 `docker compose up -d bot_grid_btc` se chiusa), preceduta da verifica dello stato di mercato, non
 solo dello stato del flag.
 
-## 5. Raccomandazione finale
+## 5. Raccomandazione finale — RINVIATA al gate di promozione di GridBTC, non più sospesa
 
-**La raccomandazione stop-vs-chiusura non può essere finalizzata da questa analisi**, per il
-motivo dichiarato in §0: il gate richiede di ancorarla al comportamento del guard esistente di
-GridBTC, e quel guard non è risultato localizzabile nel codice — quindi non è verificabile se
-GridBTC sia oggi effettivamente un servizio live con capitale esposto (come assunto da ADR-037 §5-6
-sulla base del changelog storico), oppure se sia stato dismesso/mai deployato come tale nel
-docker-compose tracciato, oppure se giri fuori da questo repo in un modo che io non posso vedere in
-sola lettura.
+**Aggiornamento 2026-07-06 (ground truth Andrea):** GridBTC è stato SOLO shadow, mai capitale
+esposto, né allora né ora. Questo chiude la domanda preliminare che la prima versione di questo
+documento lasciava aperta ("GridBTC è oggi live con capitale esposto, fuori da questo repo?" —
+risposta: no, e non lo è mai stato). Non è più un caso di "raccomandazione sospesa in attesa di
+un fatto ignoto": è un caso di **raccomandazione non ancora applicabile, perché non esiste ancora
+un bot da proteggere.**
 
-**Prima del checkpoint 2 ("wiring implementato pre-deploy"), serve una conferma esplicita di
-Andrea su un punto preliminare a qualunque scelta stop-vs-chiusura:** GridBTC è oggi effettivamente
-in esecuzione con capitale esposto su Kraken (fuori da questo repo, o altrove), sì o no? Questa non
-è una domanda che questa analisi può rispondere da sola.
+**La raccomandazione stop-vs-chiusura non viene quindi finalizzata qui — viene RINVIATA al gate di
+promozione di GridBTC** (`docs/m2-reactivation-gates.md`, protocollo unificato con l'harvester:
+shadow → criteri di promozione espliciti → G3, vedi ADR-037 §6 emendato). Quando/se GridBTC verrà
+ricostruito e rientrerà in shadow, quel momento — non questa consegna — è il punto naturale per
+riprendere l'analisi condizionale già fatta qui (§1-4) e trasformarla in raccomandazione
+definitiva, verificando allora se esiste un guard reale con cui coordinarsi (§0: oggi non esiste,
+ma "oggi" è vero solo finché GridBTC non viene ricostruito — il gate di promozione deve riverificarlo
+da capo al momento, non fidarsi di questo documento come se fosse ancora attuale a distanza di
+mesi).
 
-**Raccomandazione condizionata** (valida nell'ipotesi che GridBTC sia confermato live con
-inventario potenzialmente esposto al momento del trigger): **chiusura ordinata
-(`CLOSE_GRID_ORDERLY` via `/api/v1/forceexit`)**, non stop-nuovi-ordini. Motivazione: il failure
-mode specifico della griglia (§2) è che l'inventario direzionale si accumula proprio nella fase
-che precede il trigger di high-vol (l'EWMA a span=32 non è istantanea), quindi al momento in cui
-`btc_high_vol` diventa `True` è probabile che l'esposizione da proteggere sia già sostanziale, non
-marginale — il rischio di lasciarla aperta (stop-nuovi-ordini) supera, nel giudizio di questa
-analisi, il rischio di realizzare la perdita ora (chiusura). Coerente con il principio ADR-036 di
-preferire un esito noto e limitato a un'esposizione aperta e non quantificata durante un evento di
-durata incerta.
+**Raccomandazione condizionata già disponibile per quel momento futuro** (base per il gate di
+promozione, non decisione presa ora): **chiusura ordinata (`CLOSE_GRID_ORDERLY` via
+`/api/v1/forceexit`)**, non stop-nuovi-ordini. Motivazione: il failure mode specifico della griglia
+(§2) è che l'inventario direzionale si accumula proprio nella fase che precede il trigger di
+high-vol (l'EWMA a span=32 non è istantanea), quindi al momento in cui `btc_high_vol` diventa
+`True` è probabile che l'esposizione da proteggere sia già sostanziale, non marginale — il rischio
+di lasciarla aperta (stop-nuovi-ordini) supera, nel giudizio di questa analisi, il rischio di
+realizzare la perdita ora (chiusura). Coerente con il principio ADR-036 di preferire un esito noto
+e limitato a un'esposizione aperta e non quantificata durante un evento di durata incerta.
 
-Questa resta comunque **una raccomandazione, non una decisione** — la scelta finale del valore
-`GridBtcHighVolAction` è riservata al checkpoint, come da piano, e ora è ulteriormente condizionata
-alla risposta di Andrea sul punto preliminare sopra.
+Questa resta **una raccomandazione, non una decisione** — la scelta finale del valore
+`GridBtcHighVolAction` è riservata al gate di promozione di GridBTC (non più a un ipotetico
+"checkpoint wiring pre-deploy" pensato per un sistema già live, che non si applica: vedi ADR-037
+§5-6 emendato), quando quel gate esisterà davvero da attraversare.
