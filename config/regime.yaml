@@ -1,12 +1,16 @@
 # Soglie regime layer v0 (ADR-036 §3) — regole semplici, isteresi obbligatoria.
+# ewma_span=32 ancorato a RiskMetrics lambda=0.94 (vedi docs/nota-ancoraggio-soglie-vol-regime-2026-07.md).
+# Soglie enter/exit derivate offline da storia reale BTC/ETH OKX 2019-01-01/2026-07-05 (M1.5).
+# Provenienza completa, tie-break dichiarato e questioni aperte per la prossima ri-derivazione
+# (ottobre 2026): vedi docs/regime-threshold-provenance-2026-07.md.
 vol:
-  ewma_span: 20
+  ewma_span: 32
   btc:
-    enter_threshold: 0.80   # vol annualizzata EWMA, soglia di ingresso high-vol
-    exit_threshold: 0.60    # soglia di uscita (isteresi: exit < enter)
+    enter_threshold: 0.8711   # vol annualizzata EWMA, soglia di ingresso high-vol
+    exit_threshold: 0.5940    # soglia di uscita (isteresi: exit < enter)
   eth:
-    enter_threshold: 1.00
-    exit_threshold: 0.75
+    enter_threshold: 0.9990
+    exit_threshold: 0.8301
 funding:
   eth:
     enter_threshold: 0.0005   # funding rate, soglia harvester ON
