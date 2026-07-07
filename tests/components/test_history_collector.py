@@ -489,24 +489,22 @@ def test_build_sinks_dry_run_ignores_env():
     assert isinstance(healthcheck_sink, DryRunHealthcheckSink)
 
 
-def test_build_sinks_reads_from_env_not_argv():
-    from alerting.sinks import HealthchecksPingSink, TelegramAlertSink
+def test_build_sinks_reads_only_healthcheck_url_from_env_no_telegram_token():
+    """Privilegio minimo (decisione esplicita al checkpoint di deploy): il
+    collector non riceve MAI il token Telegram — una sola variabile reale,
+    l'alert_sink reale e' locale (LocalLogAlertSink), non Telegram."""
+    from alerting.sinks import HealthchecksPingSink, LocalLogAlertSink
 
-    env = {
-        "TG_ALERT_BOT_TOKEN": "TOKEN123",
-        "TG_ALERT_CHAT_ID": "CHAT456",
-        "HEALTHCHECKS_PING_URL_HISTORY_COLLECTOR": "https://hc-ping.com/z",
-    }
+    env = {"HEALTHCHECKS_PING_URL_HISTORY_COLLECTOR": "https://hc-ping.com/z"}
     alert_sink, healthcheck_sink = build_sinks(dry_run=False, env=env)
-    assert isinstance(alert_sink, TelegramAlertSink)
+    assert isinstance(alert_sink, LocalLogAlertSink)
     assert isinstance(healthcheck_sink, HealthchecksPingSink)
-    assert alert_sink._bot_token == "TOKEN123"  # noqa: SLF001
     assert healthcheck_sink._url == "https://hc-ping.com/z"  # noqa: SLF001
 
 
 def test_build_sinks_raises_naming_missing_variable():
     with pytest.raises(ValueError, match="HEALTHCHECKS_PING_URL_HISTORY_COLLECTOR"):
-        build_sinks(dry_run=False, env={"TG_ALERT_BOT_TOKEN": "T", "TG_ALERT_CHAT_ID": "C"})
+        build_sinks(dry_run=False, env={})
 
 
 def test_default_alive_but_blind_threshold_is_60_minutes():

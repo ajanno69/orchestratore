@@ -6,6 +6,7 @@ from alerting.sinks import (
     DryRunAlertSink,
     DryRunHealthcheckSink,
     HealthchecksPingSink,
+    LocalLogAlertSink,
     TelegramAlertSink,
 )
 
@@ -66,6 +67,18 @@ def test_healthchecks_ping_sink_calls_expected_url():
     sink.ping()
 
     assert calls == ["https://hc-ping.com/abc-123"]
+
+
+def test_local_log_alert_sink_writes_to_stderr_without_raising(capsys):
+    """Privilegio minimo (componenti che non devono poter usare il canale
+    Telegram condiviso, es. history-collector): l'alert resta locale
+    (stderr, catturato da journald sotto systemd), nessuna credenziale
+    esterna richiesta, nessuna rete."""
+    sink = LocalLogAlertSink()
+    sink.send("COLLECTOR GUASTO — test")
+    captured = capsys.readouterr()
+    assert "COLLECTOR GUASTO — test" in captured.err
+    assert captured.out == ""
 
 
 def test_healthchecks_ping_sink_propagates_transport_errors():

@@ -8,6 +8,7 @@ mai un `if dry_run: ...` sparso nel codice di dominio, sempre un
 from __future__ import annotations
 
 import json
+import sys
 import urllib.request
 from typing import Protocol
 
@@ -30,6 +31,18 @@ class DryRunAlertSink:
     def send(self, text: str) -> None:
         self.sent.append(text)
         print(f"[DRY-RUN ALERT] {text}")
+
+
+class LocalLogAlertSink:
+    """Alert locale via stderr (catturato da journald sotto systemd) —
+    nessuna credenziale esterna, nessuna rete. Per componenti a privilegio
+    minimo che non devono poter usare il canale Telegram condiviso (es.
+    history-collector: un guasto o un bug lì non deve poter mandare
+    messaggi per conto del wiring-loop/regime-daemon, che hanno accesso al
+    token del bot — vedi `docs/m2-history-collector-runbook.md`)."""
+
+    def send(self, text: str) -> None:
+        print(f"[ALERT] {text}", file=sys.stderr)
 
 
 class DryRunHealthcheckSink:

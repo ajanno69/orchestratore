@@ -69,7 +69,7 @@ from alerting.sinks import (
     DryRunHealthcheckSink,
     HealthcheckSink,
     HealthchecksPingSink,
-    TelegramAlertSink,
+    LocalLogAlertSink,
 )
 from components.regime_wiring import (
     GridBtcHighVolAction,
@@ -91,8 +91,6 @@ DEFAULT_GRIDBTC_ACTION = (
     GridBtcHighVolAction.STOP_NEW_ORDERS
 )  # inerte, stesso placeholder di wiring_loop
 
-TG_BOT_TOKEN_ENV = "TG_ALERT_BOT_TOKEN"
-TG_CHAT_ID_ENV = "TG_ALERT_CHAT_ID"
 HEALTHCHECKS_ENV_VAR = "HEALTHCHECKS_PING_URL_HISTORY_COLLECTOR"
 
 
@@ -446,24 +444,33 @@ def build_sinks(
     dry_run: bool,
     env: Mapping[str, str] | None = None,
 ) -> tuple[AlertSink, HealthcheckSink]:
-    """Stesso contratto di `regime_daemon.build_sinks`/`wiring_loop.build_sinks`
-    (duplicato deliberatamente, stesso motivo: processi indipendenti) —
-    credenziali SOLO da un mapping iniettabile (di norma `os.environ`), mai
-    da CLI/argv (incident 2026-07-07, vedi `docs/m2-deploy-runbook.md`)."""
+    """Credenziali SOLO da un mapping iniettabile (di norma `os.environ`),
+    mai da CLI/argv (incident 2026-07-07, vedi `docs/m2-deploy-runbook.md`).
+
+    Privilegio minimo (decisione esplicita di Andrea al checkpoint di
+    deploy): a differenza di `regime_daemon`/`wiring_loop`, questo
+    collector NON riceve il token del bot Telegram — un guasto o un bug in
+    un componente nuovo e a privilegio minimo non deve poter mandare
+    messaggi sul canale condiviso per conto degli altri due processi.
+    L'alert reale resta quindi LOCALE (`LocalLogAlertSink`, stderr →
+    journald) — l'unico segnale esterno è l'healthcheck (o la sua
+    assenza, che scatena la notifica nativa di healthchecks.io). Serve
+    quindi UNA SOLA variabile reale: `HEALTHCHECKS_PING_URL_HISTORY_COLLECTOR`,
+    in un `EnvironmentFile` SEPARATO da quello di `regime_daemon`/
+    `wiring_loop` (mai leggibile dal collector il token Telegram né i
+    ping URL degli altri due — vedi `docs/m2-history-collector-runbook.md`)."""
     if dry_run:
         return DryRunAlertSink(), DryRunHealthcheckSink()
 
     env = env if env is not None else os.environ
-    required = (TG_BOT_TOKEN_ENV, TG_CHAT_ID_ENV, HEALTHCHECKS_ENV_VAR)
-    missing = [name for name in required if not env.get(name)]
-    if missing:
+    if not env.get(HEALTHCHECKS_ENV_VAR):
         raise ValueError(
-            f"variabili d'ambiente mancanti per l'esecuzione reale: {', '.join(missing)}. "
-            "Impostarle in EnvironmentFile (mai passarle da CLI: finirebbero in argv, "
-            "visibili via /proc/PID/cmdline) — mai un avvio mezzo-configurato."
+            f"variabile d'ambiente mancante per l'esecuzione reale: {HEALTHCHECKS_ENV_VAR}. "
+            "Impostarla in EnvironmentFile (mai passarla da CLI: finirebbe in argv, "
+            "visibile via /proc/PID/cmdline) — mai un avvio mezzo-configurato."
         )
     return (
-        TelegramAlertSink(bot_token=env[TG_BOT_TOKEN_ENV], chat_id=env[TG_CHAT_ID_ENV]),
+        LocalLogAlertSink(),
         HealthchecksPingSink(url=env[HEALTHCHECKS_ENV_VAR]),
     )
 
