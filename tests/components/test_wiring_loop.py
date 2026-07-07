@@ -138,6 +138,34 @@ def test_run_loop_uses_fresh_sequencer_reemits_current_state_on_restart(tmp_path
     assert "LAYER LAVORA" in alert_sink.sent[0]
 
 
+def test_run_loop_survives_when_alert_sink_itself_fails_during_cycle_failure():
+    """Finding review indipendente (1): stessa proprieta' richiesta a
+    regime_daemon.run_loop - se anche l'invio dell'alert fallisce dentro
+    l'except, il loop non deve propagare quell'eccezione."""
+
+    class FailingAlertSink:
+        def send(self, text: str) -> None:
+            raise TimeoutError("anche Telegram e' irraggiungibile")
+
+    class RecordingHealthcheckSink:
+        def ping(self) -> None:
+            pass
+
+    run_loop(
+        FailingStore(),
+        WiringSequencer(rate_limit=RATE_LIMIT),
+        STALENESS,
+        GRIDBTC_ACTION,
+        FailingAlertSink(),
+        RecordingHealthcheckSink(),
+        poll_interval=timedelta(minutes=5),
+        max_iterations=2,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+    # se arriviamo qui senza eccezione propagata, il loop e' sopravvissuto
+
+
 def test_build_sinks_returns_dry_run_pair_when_dry_run_true():
     from alerting.sinks import DryRunAlertSink, DryRunHealthcheckSink
 

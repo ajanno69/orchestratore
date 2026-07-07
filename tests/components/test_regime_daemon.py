@@ -85,6 +85,18 @@ def test_fetch_latest_returns_calls_exchange_with_asset_usdt_symbol_and_daily_ti
     assert len(returns) == 200  # 201 candele -> 200 rendimenti dopo pct_change().dropna()
 
 
+def test_fetch_latest_returns_raises_when_exchange_returns_far_fewer_candles_than_requested():
+    """Finding review indipendente (5): se OKX restituisce silenziosamente
+    molte meno candele del richiesto (endpoint parziale, nuovo listing,
+    downtime), un vol calcolato su pochissimi punti verrebbe confrontato
+    con soglie calibrate su ~200 punti senza che nessuno se ne accorga —
+    stesso tipo di guardia gia' presente in compute_ewma_vol per il caso
+    zero-candele, estesa al caso "poche candele"."""
+    exchange = FakeExchange({"BTC/USDT": make_candles(5, 0.01)})
+    with pytest.raises(ValueError, match="candele insufficienti"):
+        fetch_latest_returns(exchange, "BTC", limit=200)
+
+
 def test_run_once_updates_states_and_persists_snapshot(tmp_path):
     high_return = 0.06  # vol ~= 0.06*sqrt(365) = 1.146, sopra enter BTC (0.8711) ed ETH (0.9990)
     exchange = FakeExchange(
@@ -272,6 +284,37 @@ def test_build_sinks_raises_when_real_mode_missing_any_credential(
             chat_id=chat_id,
             healthchecks_url=healthchecks_url,
         )
+
+
+def test_run_loop_survives_when_alert_sink_itself_fails_during_cycle_failure(tmp_path):
+    """Finding review indipendente (1): se alert_sink.send() fallisce
+    DENTRO l'except (es. rete VPS giu': OKX e Telegram irraggiungibili
+    insieme), il loop non deve propagare quell'eccezione — altrimenti il
+    pattern VIVO-MA-CIECO diventa MORTO-E-MUTO, esattamente il rischio
+    dichiarato in ADR-037 8 ma non ancora chiuso nel codice."""
+    store = RegimeStateStore(tmp_path)
+
+    class FailingAlertSink:
+        def send(self, text: str) -> None:
+            raise TimeoutError("anche Telegram e' irraggiungibile")
+
+    class RecordingHealthcheckSink:
+        def ping(self) -> None:
+            pass
+
+    run_loop(
+        FailingExchange(),
+        FakeFundingSource(0.0),
+        store,
+        REGIME_CONFIG,
+        poll_interval=timedelta(minutes=15),
+        alert_sink=FailingAlertSink(),
+        healthcheck_sink=RecordingHealthcheckSink(),
+        max_iterations=2,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+    # se arriviamo qui senza eccezione propagata, il loop e' sopravvissuto
 
 
 def test_run_loop_sleeps_between_iterations_but_not_after_the_last():

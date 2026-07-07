@@ -11,9 +11,10 @@ nessuna operazione autenticata."""
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 import pandas as pd
@@ -34,6 +35,7 @@ from regime.vol_state import VolRegimeState, compute_ewma_vol
 DEFAULT_POLL_INTERVAL = timedelta(minutes=15)  # ADR-037 §10
 
 LOOKBACK_CANDLES = 200  # ADR-037 §10: ~6x ewma_span=32, decadimento esponenziale del filtro
+MIN_CANDLES_FRACTION = 0.5  # sotto meta' delle candele richieste: fetch parziale, mai silenzioso
 
 
 class OhlcvSource(Protocol):
@@ -46,8 +48,26 @@ def fetch_latest_returns(
     """Rendimenti giornalieri delle ultime `limit` candele di `asset`/USDT
     (nessun `since`: ccxt restituisce le più recenti). Non l'intera storia
     dal 2019 come in M1.5 — approssimazione a precisione pratica
-    dell'EWMA, vedi ADR-037 §10."""
+    dell'EWMA, vedi ADR-037 §10.
+
+    Rifiuta esplicitamente un fetch che restituisce molte meno candele del
+    richiesto (finding review indipendente checkpoint pre-deploy): un
+    endpoint parziale, un nuovo listing, o un downtime non devono produrre
+    un vol calcolato silenziosamente su dati insufficienti — `VolRegimeState`
+    confronterebbe quel vol con soglie calibrate su ~200 punti senza che
+    nessuno se ne accorga (nessuna eccezione, nessun alert: `compute_ewma_vol`
+    solleva solo sul caso ESTREMO di zero rendimenti, non su "pochi
+    rendimenti"). Stessa filosofia di auto-invalidazione già in uso in
+    `vol_state`/`hysteresis`, estesa qui al caso "dati insufficienti"."""
     candles = exchange.fetch_ohlcv(f"{asset}/USDT", timeframe="1d", limit=limit)
+    min_candles = int(limit * MIN_CANDLES_FRACTION)
+    if len(candles) < min_candles:
+        raise ValueError(
+            f"candele insufficienti per {asset}/USDT: ricevute {len(candles)}, "
+            f"richieste {limit} (minimo accettabile {min_candles}). Fetch "
+            "parziale o endpoint degradato — non si calcola un vol su dati "
+            "insufficienti."
+        )
     df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
     df["date"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.drop_duplicates(subset="date").set_index("date").sort_index()
@@ -121,7 +141,7 @@ def run_loop(
     healthcheck_sink: HealthcheckSink,
     max_iterations: int | None = None,
     sleep_fn=time.sleep,
-    now_fn=datetime.utcnow,
+    now_fn=lambda: datetime.now(UTC),
 ) -> None:
     """Loop di produzione. `max_iterations=None` gira per sempre (uso
     reale, systemd); un intero finito è per `--once`/test/smoke test.
@@ -132,7 +152,16 @@ def run_loop(
     lavoro è stato fatto, non solo che il processo è vivo). L'except largo
     qui è intenzionale ed è l'unico punto del codice dove è corretto: è il
     confine di resilienza del loop di produzione, non un tentativo di
-    nascondere un bug — il messaggio include sempre l'eccezione reale."""
+    nascondere un bug — il messaggio include sempre l'eccezione reale.
+
+    Anche l'invio dell'alert stesso è protetto (finding review
+    indipendente, ADR-037 §10): se il canale di alert è irraggiungibile
+    proprio mentre il ciclo di misura fallisce (scenario realistico,
+    correlato — es. rete del VPS giù, OKX e Telegram irraggiungibili
+    insieme), il fallimento dell'invio NON deve propagare e uccidere il
+    loop — altrimenti il pattern VIVO-MA-CIECO diventerebbe MORTO-E-MUTO,
+    esattamente il rischio già dichiarato in ADR-037 §8. Ultima risorsa:
+    stderr (catturato da systemd nel journal), mai un'eccezione."""
     initial_snapshot = resolve_initial_snapshot(store)
     states = RegimeDaemonStates.seeded_from(initial_snapshot, regime_config)
 
@@ -142,11 +171,19 @@ def run_loop(
             run_once(exchange, funding_source, states, store, now=now_fn())
             healthcheck_sink.ping()
         except Exception as exc:  # noqa: BLE001 - confine di resilienza intenzionale, vedi docstring
-            alert_sink.send(
+            message = (
                 "LAYER CIECO — regime-daemon: ciclo di misura fallito "
                 f"({exc!r}). Nessuno snapshot scritto in questo ciclo, "
                 "il precedente resta valido fino alla soglia di staleness."
             )
+            try:
+                alert_sink.send(message)
+            except Exception as alert_exc:  # noqa: BLE001 - vedi docstring, mai propagare da qui
+                print(
+                    f"[regime-daemon] impossibile inviare l'alert di ciclo fallito: "
+                    f"{alert_exc!r} (causa originale del ciclo fallito: {exc!r})",
+                    file=sys.stderr,
+                )
         iteration += 1
         if max_iterations is None or iteration < max_iterations:
             sleep_fn(poll_interval.total_seconds())

@@ -215,8 +215,11 @@ capacità di dichiararsi "cieco", vanificando il fail-safe. Due unit systemd sep
 
 **Cadenza di polling — pre-registrata, non lasciata a un default implicito del codice:**
 - `regime-daemon`: **15 minuti**. Margine di 4x sotto la soglia di staleness già approvata
-  (`max_age=1h`, Task 1/checkpoint 2) — tollera un singolo ciclo perso (es. un timeout OKX
-  transitorio) senza far scattare il fail-safe di staleness lato wiring. Più frequente sarebbe
+  (`max_age=1h`, Task 1/checkpoint 2) — **correzione review indipendente (checkpoint pre-deploy
+  entrypoint runtime): il margine tollera fino a ~3 cicli persi consecutivi, non uno solo** (4
+  cicli da 15 minuti entrano nella finestra di 60 minuti prima che scatti lo stale) — es. un
+  timeout OKX transitorio, anche ripetuto per un'ora, non fa scattare il fail-safe di staleness
+  lato wiring. Più frequente sarebbe
   inutile (vol/funding sono segnali di regime lenti, non un segnale di trading ad alta frequenza);
   più raro eroderebbe il margine sotto la soglia di staleness.
 - `wiring-loop`: **5 minuti**. Legge solo un file locale (nessuna chiamata di rete), quindi un

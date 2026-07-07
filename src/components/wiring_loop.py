@@ -10,8 +10,9 @@ non ancora costruito, resta fuori scope."""
 
 from __future__ import annotations
 
+import sys
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from alerting.sinks import (
     AlertSink,
@@ -65,20 +66,36 @@ def run_loop(
     poll_interval: timedelta,
     max_iterations: int | None = None,
     sleep_fn=time.sleep,
-    now_fn=datetime.utcnow,
+    now_fn=lambda: datetime.now(UTC),
 ) -> None:
     """Loop di produzione, stessa struttura di `regime_daemon.run_loop`:
     un ciclo fallito invia un alert e NON pinga l'healthcheck (VIVO-MA-CIECO),
     il loop continua. `sequencer` va costruito fresco a ogni avvio di
     processo dal chiamante (`main`) — il contratto di riavvio vive in
-    `WiringSequencer` stesso (ADR-037 §9), qui si riusa senza reinventarlo."""
+    `WiringSequencer` stesso (ADR-037 §9), qui si riusa senza reinventarlo.
+
+    Anche l'invio dell'alert è protetto (finding review indipendente,
+    ADR-037 §10, stessa motivazione di `regime_daemon.run_loop`): un
+    fallimento del canale di alert durante la gestione di un ciclo fallito
+    non deve propagare — ultima risorsa stderr, mai un'eccezione che
+    ucciderebbe il loop."""
     iteration = 0
     while max_iterations is None or iteration < max_iterations:
         try:
-            run_once(store, sequencer, staleness, gridbtc_high_vol_action, alert_sink, now=now_fn())
+            run_once(
+                store, sequencer, staleness, gridbtc_high_vol_action, alert_sink, now=now_fn()
+            )
             healthcheck_sink.ping()
         except Exception as exc:  # noqa: BLE001 - confine di resilienza intenzionale, vedi regime_daemon
-            alert_sink.send(f"LAYER CIECO — wiring-loop: ciclo di decisione fallito ({exc!r}).")
+            message = f"LAYER CIECO — wiring-loop: ciclo di decisione fallito ({exc!r})."
+            try:
+                alert_sink.send(message)
+            except Exception as alert_exc:  # noqa: BLE001 - vedi docstring, mai propagare da qui
+                print(
+                    f"[wiring-loop] impossibile inviare l'alert di ciclo fallito: "
+                    f"{alert_exc!r} (causa originale del ciclo fallito: {exc!r})",
+                    file=sys.stderr,
+                )
         iteration += 1
         if max_iterations is None or iteration < max_iterations:
             sleep_fn(poll_interval.total_seconds())
