@@ -47,17 +47,47 @@ Confermato esplicitamente dal reviewer:
 - Backward-compat verificata sia lato `regime_state.json` (dict senza chiavi) sia lato SQLite (DB
   con schema vecchio, riga pre-esistente non persa dopo la migrazione).
 
-**3 note minori, non bloccanti, non affrontate in questa sessione** (dichiarate qui, non nascoste):
+**3 note minori, non bloccanti** (dichiarate al momento del GO iniziale):
 1. `NaN`/`inf` da `compute_ewma_vol` in casi degeneri finirebbero in `regime_state.json` come token
    JSON non-standard (`json.dumps(allow_nan=True)` di default) — il roundtrip Python regge, un
-   parser strict esterno no. Nessun test copre questo caso.
+   parser strict esterno no. Nessun test copriva questo caso.
 2. I nuovi campi float non sono validati in `regime_wiring.py` (a differenza dei booleani) —
-   accettabile perché restano osservativi, non decisionali.
-3. La guardia `PRAGMA table_info` nella migrazione non è a prova di race tra processi concorrenti
-   che aprano lo stesso DB — teorico, il collector è single-writer per design.
+   accettabile perché restano osservativi, non decisionali, ma senza un test che lo garantisse.
+3. La guardia `PRAGMA table_info` nella migrazione non era a prova di race tra processi concorrenti
+   che aprano lo stesso DB — teorico, il collector è single-writer per design, ma non testato.
 
-Nessuna di queste tre note richiede un fix prima della coda: possono essere riprese al momento del
-deploy post-gate, se rilevanti allora.
+### 2bis. Chiusura delle 3 note (stesso giorno, commit `41ba9d4`)
+
+Andrea ha richiesto la chiusura immediata (precedente: Task 5, Task 11 — i Minor non viaggiano in
+coda verso il deploy). Chiuse con TDD + re-review indipendente (Opus, contesto fresco, dispatchata
+sul diff committato `41ba9d4`):
+
+1. **Chiusa per costruzione, non con nuovo codice**: `VolRegimeState.update()` già solleva
+   `ValueError` su un `latest_vol` non finito (`src/regime/vol_state.py`), chiamato PRIMA di
+   `build_snapshot` in `regime_daemon.run_once` — un vol non-finito interrompe il ciclo prima che
+   qualunque snapshot venga scritto, per ENTRAMBI gli asset (verificato dal reviewer: se BTC è
+   finito ma ETH è NaN, l'update di ETH esplode comunque prima di ogni write). Nuovo test di
+   regressione (`test_run_once_never_persists_non_finite_ewma_vol`, monkeypatch su
+   `compute_ewma_vol` -> NaN) rende l'invariante esplicito e verificato.
+2. **Chiusa con un test-muro**: `test_resolve_wiring_decision_ignores_numeric_ewma_vol_fields` —
+   due `RegimeSnapshot` identici tranne nei campi `ewma_vol` (uno `None`, l'altro con valori
+   assurdi 99.0/-1.0) producono la stessa identica `WiringDecision`. Il reviewer ha confermato che
+   il test romperebbe davvero se in futuro qualcuno introducesse un uso accidentale di quei campi
+   nella decisione.
+3. **Chiusa con un fix reale**: `HistoryStore._migrate_add_ewma_vol_columns()` riscritta da
+   check-then-act (`PRAGMA table_info` poi `ALTER TABLE` solo se assente — finestra TOCTOU teorica)
+   ad attempt-then-catch (tenta l'`ALTER` direttamente, cattura solo `OperationalError` con
+   messaggio `"duplicate column name"`, ri-solleva qualunque altro errore). Il reviewer ha
+   confermato che questo chiude davvero la race (gli `ALTER` sono serializzati dal write-lock
+   SQLite, il "perdente" viene assorbito invece di crashare) e non la sposta altrove.
+
+**Verdetto re-review: GO, le 3 note sono definitivamente chiuse.** Residui minori segnalati dal
+reviewer, tutti fuori dal path di produzione M1 e non richiedono ulteriore azione: (a) un
+ipotetico chiamante futuro di `build_snapshot` che bypassasse `update()` potrebbe ancora scrivere
+NaN letterale — non introdotto da questo lavoro; (b) il match su stringa `"duplicate column name"`
+dipende dal messaggio esatto di SQLite (stabile da anni, rischio basso).
+
+211/211 test verdi, ruff pulito dopo la chiusura.
 
 ## 3. Stato: IN CODA
 
@@ -83,5 +113,6 @@ nessuna credenziale in argv (regola permanente post-incidente).
 ## 5. Commit
 
 - `041f4fe` — feat: schema prep vol numerica (repo-only, TDD).
+- `41ba9d4` — test: chiusura 3 note minori review Parte 2 (TDD).
 
-Pushato su `master`.
+Pushati su `master`.
