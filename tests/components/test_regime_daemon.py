@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta
 
+import pandas as pd
 import pytest
 
 from components.regime_daemon import (
@@ -149,6 +150,44 @@ def test_run_once_persists_numeric_ewma_vol_values(tmp_path):
     persisted = store.read()
     assert persisted.btc_ewma_vol == snapshot.btc_ewma_vol
     assert persisted.eth_ewma_vol == snapshot.eth_ewma_vol
+
+
+def test_run_once_never_persists_non_finite_ewma_vol(tmp_path, monkeypatch):
+    """Chiude nota minore 1 del reviewer indipendente (Parte 2, review
+    041f4fe): un vol NaN/inf calcolato a monte non deve mai finire in
+    regime_state.json come token JSON non standard
+    (json.dumps(allow_nan=True) di default produrrebbe 'NaN' letterale,
+    illeggibile da un parser JSON strict).
+
+    Chiuso per costruzione, non con nuovo codice: VolRegimeState.update()
+    già solleva ValueError su un latest_vol non finito (vedi
+    regime/vol_state.py), ed è chiamato PRIMA di build_snapshot in
+    run_once — un vol non-finito interrompe il ciclo prima che qualunque
+    snapshot (coi nuovi campi o senza) venga scritto. Questo test rende
+    quell'invariante esplicito e verificato, non solo dedotto leggendo il
+    codice."""
+    import components.regime_daemon as regime_daemon_module
+
+    def fake_compute_ewma_vol(returns, span):
+        return pd.Series([float("nan")], index=returns.index[-1:])
+
+    monkeypatch.setattr(regime_daemon_module, "compute_ewma_vol", fake_compute_ewma_vol)
+
+    exchange = FakeExchange(
+        {
+            "BTC/USDT": make_candles(200, 0.01),
+            "ETH/USDT": make_candles(200, 0.01),
+        }
+    )
+    store = RegimeStateStore(tmp_path)
+    states = RegimeDaemonStates.seeded_from(
+        build_snapshot(False, False, False, now=NOW), REGIME_CONFIG
+    )
+
+    with pytest.raises(ValueError, match="non-finito"):
+        run_once(exchange, FakeFundingSource(0.0), states, store, now=NOW)
+
+    assert store.read() is None, "un vol non-finito non deve mai produrre uno snapshot persistito"
 
 
 def test_run_once_propagates_fetch_failure_without_writing_snapshot(tmp_path):

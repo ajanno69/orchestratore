@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 
 import pytest
@@ -125,6 +126,54 @@ def test_init_schema_migration_is_idempotent_on_pre_existing_db_without_vol_colu
     assert "btc_ewma_vol" in columns
     count = store._conn.execute("SELECT COUNT(*) FROM regime_history").fetchone()[0]  # noqa: SLF001
     assert count == 1  # riga pre-esistente intatta, non persa dalla migrazione
+
+
+def test_migrate_add_ewma_vol_columns_tolerates_column_added_concurrently(tmp_path):
+    """Chiude nota minore 3 del reviewer indipendente (Parte 2, review
+    041f4fe): la guardia originale era check-then-act (PRAGMA table_info,
+    poi ALTER) — finestra TOCTOU teorica tra due processi che aprono lo
+    stesso DB e vedono entrambi la colonna assente. Fix: sostituita con
+    tentativo diretto + cattura selettiva di 'duplicate column name' (mai
+    un except largo: qualunque altro OperationalError continua a
+    propagare, stessa disciplina già dichiarata nel modulo).
+
+    Simula l'esito della race (le colonne sono già presenti quando la
+    migrazione tenta di aggiungerle, indipendentemente dal perché) e
+    richiama direttamente il tentativo di ALTER — con la vecchia guardia
+    check-then-act questo non sarebbe mai stato raggiunto (il PRAGMA
+    avrebbe visto le colonne e saltato l'ALTER anche nel caso sequenziale
+    già coperto sopra); qui si forza il path di ALTER-su-colonna-già-
+    presente che nella race reale è esattamente ciò che il secondo
+    processo incontrerebbe."""
+    store = HistoryStore(tmp_path / "history.db")  # init_schema già aggiunge entrambe le colonne
+
+    store._migrate_add_ewma_vol_columns()  # noqa: SLF001 — richiamata: colonne già presenti, non deve sollevare
+
+    columns = {
+        row[1]
+        for row in store._conn.execute("PRAGMA table_info(regime_history)").fetchall()  # noqa: SLF001
+    }
+    assert "btc_ewma_vol" in columns
+    assert "eth_ewma_vol" in columns
+
+
+def test_migrate_add_ewma_vol_columns_reraises_non_duplicate_operational_errors(tmp_path):
+    """Non deve nascondere un OperationalError genuino non riconducibile a
+    'duplicate column name' (es. disco pieno, DB corrotto) — mai un except
+    largo che maschera un bug reale, stessa disciplina già dichiarata nel
+    modulo per l'except largo del loop di produzione."""
+    store = HistoryStore(tmp_path / "history.db")
+
+    class FailingConn:
+        def execute(self, sql, *args, **kwargs):
+            if "ALTER TABLE" in sql:
+                raise sqlite3.OperationalError("disk I/O error")
+            raise AssertionError(f"chiamata SQL inattesa nel test: {sql!r}")
+
+    store._conn = FailingConn()  # noqa: SLF001
+
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+        store._migrate_add_ewma_vol_columns()  # noqa: SLF001
 
 
 def test_insert_snapshot_row_persists_ewma_vol_values(tmp_path):

@@ -223,15 +223,24 @@ class HistoryStore:
         `ALTER TABLE ADD COLUMN` non tocca le righe già presenti, resta
         NULL su quelle vecchie (coerente con `RegimeSnapshot.btc_ewma_vol`
         opzionale a None per backward-compat, vedi regime/store.py).
-        Guardata via `PRAGMA table_info` invece di riprovare l'ALTER e
-        ignorare l'errore: SQLite solleva `OperationalError` se la colonna
-        esiste già, e un except largo qui nasconderebbe anche un errore
-        di sintassi reale — meglio verificare esplicitamente."""
-        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(regime_history)")}
-        if "btc_ewma_vol" not in existing:
-            self._conn.execute("ALTER TABLE regime_history ADD COLUMN btc_ewma_vol REAL")
-        if "eth_ewma_vol" not in existing:
-            self._conn.execute("ALTER TABLE regime_history ADD COLUMN eth_ewma_vol REAL")
+
+        Tentativo diretto + cattura selettiva di 'duplicate column name'
+        (non un check-then-act con `PRAGMA table_info` seguito da ALTER
+        solo se assente): un check-then-act ha una finestra TOCTOU teorica
+        fra due processi che aprono lo stesso file DB e vedono entrambi la
+        colonna assente prima che uno dei due la aggiunga (nota minore
+        review indipendente 2026-07-07, commit 041f4fe) — con l'ALTER
+        diretto, il "perdente" della race incontra semplicemente
+        'duplicate column name' invece di corrompere lo schema o
+        sollevare senza motivo. Qualunque altro `OperationalError`
+        continua a propagare — mai un except largo che nasconda un errore
+        di sintassi o un problema reale di I/O."""
+        for column in ("btc_ewma_vol", "eth_ewma_vol"):
+            try:
+                self._conn.execute(f"ALTER TABLE regime_history ADD COLUMN {column} REAL")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
 
     def record_collection_start(self, now: datetime) -> None:
         """Idempotente: mai sovrascritto dopo la prima chiamata riuscita —

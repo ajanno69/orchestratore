@@ -137,6 +137,41 @@ def test_gridbtc_normal_when_not_high_vol():
     assert decision.gridbtc_command == GridBtcCommand.NORMAL
 
 
+def test_resolve_wiring_decision_ignores_numeric_ewma_vol_fields():
+    """Chiude nota minore 2 del reviewer indipendente (Parte 2, review
+    041f4fe): btc_ewma_vol/eth_ewma_vol (schema prep repo-only, mai
+    deployati prima del gate 21/07) devono restare puramente osservativi
+    — il muro Binario A/B richiede che NESSUNA decisione di wiring/capitale
+    dipenda da loro. Due snapshot identici tranne che nei campi numerici
+    devono produrre ESATTAMENTE la stessa decisione: se in futuro qualcuno
+    li introduce per errore in resolve_wiring_decision, questo test rompe
+    prima che il cambiamento arrivi a un reviewer umano."""
+    base = build_snapshot(False, True, True, now=datetime(2026, 7, 6, 12, 0, 0))
+    with_vol = RegimeSnapshot(
+        timestamp=base.timestamp,
+        btc_high_vol=base.btc_high_vol,
+        eth_high_vol=base.eth_high_vol,
+        eth_harvester_on=base.eth_harvester_on,
+        btc_ewma_vol=99.0,  # valore assurdo apposta: se venisse letto, il test lo rileverebbe
+        eth_ewma_vol=-1.0,
+    )
+
+    decision_without = resolve_wiring_decision(
+        base,
+        now=NOW,
+        staleness=STALENESS,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+    decision_with = resolve_wiring_decision(
+        with_vol,
+        now=NOW,
+        staleness=STALENESS,
+        gridbtc_high_vol_action=GridBtcHighVolAction.STOP_NEW_ORDERS,
+    )
+
+    assert decision_with == decision_without
+
+
 def test_load_snapshot_safely_returns_none_on_corrupted_file(tmp_path):
     store = RegimeStateStore(tmp_path)
     (tmp_path / "regime_state.json").write_text("{not valid json", encoding="utf-8")
