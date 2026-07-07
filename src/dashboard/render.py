@@ -180,8 +180,8 @@ def _vol_reconstruction_section_html(vol_series_by_asset: dict[str, VolSeries] |
         render_vol_reconstruction_png(vol_series_by_asset), "vol EWMA ricostruita ex-post"
     )
     thresholds_rows = "\n".join(
-        f"<tr><td>{escape(asset)}</td><td>{s.enter_threshold:.2f}</td>"
-        f"<td>{s.exit_threshold:.2f}</td></tr>"
+        f"<tr><td>{escape(asset)}</td><td>{s.enter_threshold:.4f}</td>"
+        f"<td>{s.exit_threshold:.4f}</td></tr>"
         for asset, s in vol_series_by_asset.items()
     )
     return (

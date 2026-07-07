@@ -119,8 +119,8 @@ def _vol_series(asset: str, values: list[float]) -> VolSeries:
     return VolSeries(
         asset=asset,
         vol=pd.Series(values, index=index),
-        enter_threshold=0.87 if asset == "BTC" else 0.99,
-        exit_threshold=0.59 if asset == "BTC" else 0.83,
+        enter_threshold=0.8711 if asset == "BTC" else 0.9990,
+        exit_threshold=0.5940 if asset == "BTC" else 0.8301,
     )
 
 
@@ -154,5 +154,9 @@ def test_render_html_with_vol_reconstruction_shows_ex_post_label_and_thresholds(
     assert "non è il valore osservato dal daemon" in html.lower() or (
         "non e' il valore osservato dal daemon" in html.lower()
     )
-    assert "0.87" in html  # soglia enter BTC
-    assert "0.59" in html  # soglia exit BTC
+    assert "0.8711" in html  # soglia enter BTC
+    assert "0.5940" in html  # soglia exit BTC
+    # regressione: con arrotondamento a 2 decimali 0.9990 diventerebbe "1.00",
+    # facendo credere che la soglia ETH sia esattamente 1.0 invece di 0.999
+    assert "0.9990" in html  # soglia enter ETH — precisione a 4 decimali come il config
+    assert "1.00" not in html
