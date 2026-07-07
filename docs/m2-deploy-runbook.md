@@ -19,6 +19,15 @@ sessione diventa ora solo esecuzione, come previsto.
 qualunque passo che presuppone un consumatore GridBTC attivo resta sospeso fino al gate di
 promozione (`docs/m2-reactivation-gates.md`).
 
+**Regola permanente (incident 2026-07-07, deploy reale — vedi report di deploy per la narrativa
+completa): MAI segreti in argv.** Le prime unit systemd di questo deploy passavano credenziali
+come argomenti CLI (`--bot-token ${VAR}`), finite in chiaro nell'argv del processo — visibili via
+`/proc/PID/cmdline`/`ps aux` a chiunque avesse shell sulla macchina. Corretto rimuovendo del tutto
+quegli argomenti CLI (gli entrypoint leggono ora solo da `os.environ`, popolato da
+`EnvironmentFile`, mai da argv). **Ogni futuro runbook con credenziali deve includere la verifica
+`/proc/PID/cmdline` (o `ps aux` equivalente) come passo standard subito dopo l'avvio del
+servizio** — non un'eccezione per questo deploy, una regola per tutti i prossimi.
+
 Stesso pattern operativo di funding-harvester (systemd + canary + healthcheck).
 
 ---
@@ -185,4 +194,11 @@ $ curl -s https://hc-ping.com/<uuid-regime-daemon>
 [output reale qui]
 $ curl -s https://hc-ping.com/<uuid-wiring-loop>
 [output reale qui]
+```
+
+**Passo standard obbligatorio dopo ogni avvio/riavvio di un servizio con credenziali (regola
+permanente post-incident 2026-07-07):**
+```
+$ sudo cat /proc/<PID>/cmdline | tr '\0' ' '
+[deve mostrare solo interprete, script e flag non segreti — MAI un token/URL con credenziale]
 ```

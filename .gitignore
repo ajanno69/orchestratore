@@ -8,3 +8,7 @@ data/
 build/
 dist/
 .claude/
+# Snapshot inventario VPS (M1 Task 13): dati operativi runtime, includono
+# unit/processi di ALTRI progetti isolati sul VPS condiviso — mai nel repo
+# (policy globale "non mischiare mai dati/config fra progetti").
+var/

@@ -36,6 +36,17 @@ GridBTC reale — oggi non esiste (vedi Task 2) — da mettere in shadow.
 
 - Segue il protocollo unico sopra, senza aggiunte. Precondizione aggiuntiva al gate G3 esistente
   (`past project/03_newcrypto-funding-harvester.md`), non lo sostituisce.
+- **Checklist di monitoring alla riattivazione (aggiunta 2026-07-07, dopo il finding sul check
+  `funding-harvester-watchdog`):** al momento della riattivazione, verificare ESPLICITAMENTE su
+  healthchecks.io (visivamente o via API, comando+output) che il check watchdog sia **uscito dalla
+  pausa e risulti "up"** dopo il primo ping del servizio riattivato. **Mai assumere l'auto-resume**
+  — un check pausato su healthchecks.io richiede un ping ricevuto per riattivarsi da solo, e
+  l'assenza di quel ping (upstream: processo non parte, URL/credenziale errata, connettività) non
+  produce nessun errore visibile se nessuno controlla lo stato reale. Precedente diretto: il check
+  `funding-harvester-watchdog` è stato trovato ancora "paused" con l'ultimo ping di settimane prima,
+  nonostante l'assunzione implicita che sarebbe ripartito da solo — verificato per davvero navigando
+  su healthchecks.io (`Current Status: This check is paused.`, nessun evento dopo la pausa), non
+  dando per scontato l'esito.
 
 ## GridBTC — CONDIZIONALE al suo shadow futuro
 
