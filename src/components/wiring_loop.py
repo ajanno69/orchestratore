@@ -10,8 +10,10 @@ non ancora costruito, resta fuori scope."""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from alerting.sinks import (
@@ -101,28 +103,41 @@ def run_loop(
             sleep_fn(poll_interval.total_seconds())
 
 
+TG_BOT_TOKEN_ENV = "TG_ALERT_BOT_TOKEN"
+TG_CHAT_ID_ENV = "TG_ALERT_CHAT_ID"
+
+
 def build_sinks(
     dry_run: bool,
-    bot_token: str | None,
-    chat_id: str | None,
-    healthchecks_url: str | None,
+    healthchecks_env_var: str,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[AlertSink, HealthcheckSink]:
     """Stessa logica di `regime_daemon.build_sinks` — duplicata
     deliberatamente (non estratta in un modulo condiviso) perché i due
     entrypoint sono processi indipendenti (ADR-037 §10) con il proprio
     ciclo di vita di configurazione; un'estrazione prematura creerebbe un
-    accoppiamento tra due processi pensati per essere disaccoppiati."""
+    accoppiamento tra due processi pensati per essere disaccoppiati.
+
+    Incident 2026-07-07 (vedi docs/m2-deploy-runbook.md, sezione
+    incident): le credenziali reali NON sono più accettate come
+    parametri/argomenti CLI — finirebbero nell'argv del processo,
+    visibile via `/proc/PID/cmdline`. Si leggono SOLO da un mapping (di
+    norma `os.environ`) iniettato per testabilità."""
     if dry_run:
         return DryRunAlertSink(), DryRunHealthcheckSink()
-    if not (bot_token and chat_id and healthchecks_url):
+
+    env = env if env is not None else os.environ
+    required = (TG_BOT_TOKEN_ENV, TG_CHAT_ID_ENV, healthchecks_env_var)
+    missing = [name for name in required if not env.get(name)]
+    if missing:
         raise ValueError(
-            "senza --dry-run servono TUTTE le credenziali reali: "
-            "--bot-token, --chat-id, --healthchecks-url "
-            "(mai un fallback silenzioso a dry-run per una credenziale mancante)."
+            f"variabili d'ambiente mancanti per l'esecuzione reale: {', '.join(missing)}. "
+            "Impostarle in EnvironmentFile (mai passarle da CLI: finirebbero in argv, "
+            "visibili via /proc/PID/cmdline) — mai un avvio mezzo-configurato."
         )
     return (
-        TelegramAlertSink(bot_token=bot_token, chat_id=chat_id),
-        HealthchecksPingSink(url=healthchecks_url),
+        TelegramAlertSink(bot_token=env[TG_BOT_TOKEN_ENV], chat_id=env[TG_CHAT_ID_ENV]),
+        HealthchecksPingSink(url=env[healthchecks_env_var]),
     )
 
 
@@ -143,16 +158,11 @@ def main(argv: list[str] | None = None) -> None:
             "vedi docs/gridbtc-highvol-analysis-m2.md"
         ),
     )
-    parser.add_argument("--bot-token", default=None)
-    parser.add_argument("--chat-id", default=None)
-    parser.add_argument("--healthchecks-url", default=None)
     args = parser.parse_args(argv)
 
     alert_sink, healthcheck_sink = build_sinks(
         dry_run=args.dry_run,
-        bot_token=args.bot_token,
-        chat_id=args.chat_id,
-        healthchecks_url=args.healthchecks_url,
+        healthchecks_env_var="HEALTHCHECKS_PING_URL_WIRING_LOOP",
     )
 
     store = RegimeStateStore(args.state_dir)

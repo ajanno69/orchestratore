@@ -11,8 +11,10 @@ nessuna operazione autenticata."""
 
 from __future__ import annotations
 
+import os
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
@@ -189,28 +191,43 @@ def run_loop(
             sleep_fn(poll_interval.total_seconds())
 
 
+TG_BOT_TOKEN_ENV = "TG_ALERT_BOT_TOKEN"
+TG_CHAT_ID_ENV = "TG_ALERT_CHAT_ID"
+
+
 def build_sinks(
     dry_run: bool,
-    bot_token: str | None,
-    chat_id: str | None,
-    healthchecks_url: str | None,
+    healthchecks_env_var: str,
+    env: Mapping[str, str] | None = None,
 ) -> tuple[AlertSink, HealthcheckSink]:
     """Confine dry-run/reale (ADR-037 §10). In `--dry-run` nessuna
-    credenziale è richiesta: i doppioni registrano soltanto. Fuori da
-    dry-run, le tre credenziali sono TUTTE obbligatorie — mai un fallback
-    silenzioso a dry-run se una manca, che nasconderebbe una
-    misconfigurazione di produzione dietro un comportamento innocuo."""
+    credenziale è richiesta: i doppioni registrano soltanto.
+
+    Incident 2026-07-07 (vedi docs/m2-deploy-runbook.md, sezione
+    incident): le credenziali reali NON sono più accettate come
+    parametri/argomenti CLI — un'unit systemd che le passasse via
+    `${VAR}` in `ExecStart` le metterebbe nell'argv del processo,
+    visibile in chiaro via `/proc/PID/cmdline`/`ps aux` a chiunque abbia
+    accesso alla macchina. Si leggono SOLO da un mapping (di norma
+    `os.environ`, popolato da `EnvironmentFile` — mai visibile in argv)
+    iniettato qui per testabilità. Se una manca, `ValueError` esplicito
+    che la nomina — mai un avvio mezzo-configurato, mai un fallback
+    silenzioso a dry-run."""
     if dry_run:
         return DryRunAlertSink(), DryRunHealthcheckSink()
-    if not (bot_token and chat_id and healthchecks_url):
+
+    env = env if env is not None else os.environ
+    required = (TG_BOT_TOKEN_ENV, TG_CHAT_ID_ENV, healthchecks_env_var)
+    missing = [name for name in required if not env.get(name)]
+    if missing:
         raise ValueError(
-            "senza --dry-run servono TUTTE le credenziali reali: "
-            "--bot-token, --chat-id, --healthchecks-url "
-            "(mai un fallback silenzioso a dry-run per una credenziale mancante)."
+            f"variabili d'ambiente mancanti per l'esecuzione reale: {', '.join(missing)}. "
+            "Impostarle in EnvironmentFile (mai passarle da CLI: finirebbero in argv, "
+            "visibili via /proc/PID/cmdline) — mai un avvio mezzo-configurato."
         )
     return (
-        TelegramAlertSink(bot_token=bot_token, chat_id=chat_id),
-        HealthchecksPingSink(url=healthchecks_url),
+        TelegramAlertSink(bot_token=env[TG_BOT_TOKEN_ENV], chat_id=env[TG_CHAT_ID_ENV]),
+        HealthchecksPingSink(url=env[healthchecks_env_var]),
     )
 
 
@@ -227,16 +244,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--once", action="store_true", help="un solo ciclo, poi esce")
     parser.add_argument("--config", default="config/regime.yaml")
     parser.add_argument("--state-dir", default=".")
-    parser.add_argument("--bot-token", default=None)
-    parser.add_argument("--chat-id", default=None)
-    parser.add_argument("--healthchecks-url", default=None)
     args = parser.parse_args(argv)
 
     alert_sink, healthcheck_sink = build_sinks(
         dry_run=args.dry_run,
-        bot_token=args.bot_token,
-        chat_id=args.chat_id,
-        healthchecks_url=args.healthchecks_url,
+        healthchecks_env_var="HEALTHCHECKS_PING_URL_REGIME_DAEMON",
     )
 
     regime_config = load_regime_config(args.config)

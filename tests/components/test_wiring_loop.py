@@ -166,16 +166,39 @@ def test_run_loop_survives_when_alert_sink_itself_fails_during_cycle_failure():
     # se arriviamo qui senza eccezione propagata, il loop e' sopravvissuto
 
 
-def test_build_sinks_returns_dry_run_pair_when_dry_run_true():
+def test_build_sinks_returns_dry_run_pair_when_dry_run_true_ignoring_env():
     from alerting.sinks import DryRunAlertSink, DryRunHealthcheckSink
 
     alert_sink, healthcheck_sink = build_sinks(
-        dry_run=True, bot_token=None, chat_id=None, healthchecks_url=None
+        dry_run=True, healthchecks_env_var="HEALTHCHECKS_PING_URL_WIRING_LOOP", env={}
     )
     assert isinstance(alert_sink, DryRunAlertSink)
     assert isinstance(healthcheck_sink, DryRunHealthcheckSink)
 
 
-def test_build_sinks_raises_when_real_mode_missing_credentials():
-    with pytest.raises(ValueError):
-        build_sinks(dry_run=False, bot_token=None, chat_id="C", healthchecks_url="https://x")
+def test_build_sinks_reads_credentials_from_env_not_argv():
+    """Finding incident deploy (2026-07-07): stessa proprieta' richiesta
+    a regime_daemon.build_sinks - mai un parametro CLI per le
+    credenziali, solo un dict env iniettato."""
+    from alerting.sinks import HealthchecksPingSink, TelegramAlertSink
+
+    env = {
+        "TG_ALERT_BOT_TOKEN": "TOKEN123",
+        "TG_ALERT_CHAT_ID": "CHAT456",
+        "HEALTHCHECKS_PING_URL_WIRING_LOOP": "https://hc-ping.com/y",
+    }
+    alert_sink, healthcheck_sink = build_sinks(
+        dry_run=False, healthchecks_env_var="HEALTHCHECKS_PING_URL_WIRING_LOOP", env=env
+    )
+    assert isinstance(alert_sink, TelegramAlertSink)
+    assert isinstance(healthcheck_sink, HealthchecksPingSink)
+    assert alert_sink._bot_token == "TOKEN123"
+    assert healthcheck_sink._url == "https://hc-ping.com/y"
+
+
+def test_build_sinks_raises_naming_the_missing_variable():
+    env = {"TG_ALERT_BOT_TOKEN": "TOKEN123", "TG_ALERT_CHAT_ID": "CHAT456"}
+    with pytest.raises(ValueError, match="HEALTHCHECKS_PING_URL_WIRING_LOOP"):
+        build_sinks(
+            dry_run=False, healthchecks_env_var="HEALTHCHECKS_PING_URL_WIRING_LOOP", env=env
+        )

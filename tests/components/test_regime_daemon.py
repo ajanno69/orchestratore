@@ -243,47 +243,67 @@ def test_run_loop_pings_healthcheck_only_on_successful_cycles(tmp_path):
     assert len(pings) == 3
 
 
-def test_build_sinks_returns_dry_run_pair_when_dry_run_true():
+def test_build_sinks_returns_dry_run_pair_when_dry_run_true_ignoring_env():
     from alerting.sinks import DryRunAlertSink, DryRunHealthcheckSink
 
     alert_sink, healthcheck_sink = build_sinks(
-        dry_run=True, bot_token=None, chat_id=None, healthchecks_url=None
+        dry_run=True, healthchecks_env_var="HEALTHCHECKS_PING_URL_REGIME_DAEMON", env={}
     )
     assert isinstance(alert_sink, DryRunAlertSink)
     assert isinstance(healthcheck_sink, DryRunHealthcheckSink)
 
 
-def test_build_sinks_returns_real_pair_when_dry_run_false_with_all_credentials():
+def test_build_sinks_reads_credentials_from_env_not_argv():
+    """Finding incident deploy (2026-07-07): le credenziali non devono
+    MAI passare da un argomento CLI (finiscono in argv, visibili via
+    /proc/PID/cmdline) — build_sinks le legge SOLO da un dict env
+    iniettato (di norma os.environ), mai da parametri espliciti."""
     from alerting.sinks import HealthchecksPingSink, TelegramAlertSink
 
+    env = {
+        "TG_ALERT_BOT_TOKEN": "TOKEN123",
+        "TG_ALERT_CHAT_ID": "CHAT456",
+        "HEALTHCHECKS_PING_URL_REGIME_DAEMON": "https://hc-ping.com/x",
+    }
     alert_sink, healthcheck_sink = build_sinks(
-        dry_run=False,
-        bot_token="TOKEN",
-        chat_id="CHAT",
-        healthchecks_url="https://hc-ping.com/x",
+        dry_run=False, healthchecks_env_var="HEALTHCHECKS_PING_URL_REGIME_DAEMON", env=env
     )
     assert isinstance(alert_sink, TelegramAlertSink)
     assert isinstance(healthcheck_sink, HealthchecksPingSink)
+    assert alert_sink._bot_token == "TOKEN123"
+    assert alert_sink._chat_id == "CHAT456"
+    assert healthcheck_sink._url == "https://hc-ping.com/x"
 
 
 @pytest.mark.parametrize(
-    "bot_token,chat_id,healthchecks_url",
-    [
-        (None, "CHAT", "https://hc-ping.com/x"),
-        ("TOKEN", None, "https://hc-ping.com/x"),
-        ("TOKEN", "CHAT", None),
-    ],
+    "missing_var",
+    ["TG_ALERT_BOT_TOKEN", "TG_ALERT_CHAT_ID", "HEALTHCHECKS_PING_URL_REGIME_DAEMON"],
 )
-def test_build_sinks_raises_when_real_mode_missing_any_credential(
-    bot_token, chat_id, healthchecks_url
-):
-    with pytest.raises(ValueError):
+def test_build_sinks_raises_naming_the_missing_variable(missing_var):
+    """Mai un avvio mezzo-configurato: se una variabile manca, l'errore
+    deve nominarla esplicitamente — non un generico 'credenziali
+    mancanti' che costringerebbe a indovinare quale."""
+    env = {
+        "TG_ALERT_BOT_TOKEN": "TOKEN123",
+        "TG_ALERT_CHAT_ID": "CHAT456",
+        "HEALTHCHECKS_PING_URL_REGIME_DAEMON": "https://hc-ping.com/x",
+    }
+    del env[missing_var]
+    with pytest.raises(ValueError, match=missing_var):
         build_sinks(
-            dry_run=False,
-            bot_token=bot_token,
-            chat_id=chat_id,
-            healthchecks_url=healthchecks_url,
+            dry_run=False, healthchecks_env_var="HEALTHCHECKS_PING_URL_REGIME_DAEMON", env=env
         )
+
+
+def test_build_sinks_raises_listing_all_missing_variables_when_multiple_missing():
+    with pytest.raises(ValueError) as exc_info:
+        build_sinks(
+            dry_run=False, healthchecks_env_var="HEALTHCHECKS_PING_URL_REGIME_DAEMON", env={}
+        )
+    message = str(exc_info.value)
+    assert "TG_ALERT_BOT_TOKEN" in message
+    assert "TG_ALERT_CHAT_ID" in message
+    assert "HEALTHCHECKS_PING_URL_REGIME_DAEMON" in message
 
 
 def test_run_loop_survives_when_alert_sink_itself_fails_during_cycle_failure(tmp_path):
