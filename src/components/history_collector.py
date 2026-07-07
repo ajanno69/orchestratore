@@ -88,7 +88,31 @@ def _parse_iso(value: str) -> datetime:
 
 
 @dataclass(frozen=True)
+class LatestRow:
+    snapshot_timestamp: str
+    btc_high_vol: bool
+    eth_high_vol: bool
+    eth_harvester_on: bool
+    collected_at: datetime
+
+
+@dataclass(frozen=True)
 class DerivedFields:
+    """`harvester_command`/`gridbtc_command`/`alert` sono LEVEL-TRIGGERED:
+    veri ad ogni riga finché la condizione persiste (derivano da
+    `resolve_wiring_decision`, che è puro e senza memoria — ricalcolato
+    identico ad ogni chiamata sullo stesso snapshot).
+
+    `alert_category`/`alert_text` sono invece EDGE-TRIGGERED: valorizzati
+    SOLO sulla riga in cui il `WiringSequencer` osservativo del collector
+    rileva una transizione — `None` su tutte le righe successive con lo
+    stesso stato (coerente col comportamento reale del wiring-loop, che
+    non manda un secondo alert Telegram per lo stesso stato). Query tipo
+    "quante righe con alert=1 mancano di alert_category" sono quindi
+    ATTESE in un regime sostenuto (prima riga: category valorizzata;
+    righe successive con stato invariato: alert=1 ma category=NULL) — non
+    un bug del collector, vedi anche la nota di divergenza qui sotto."""
+
     harvester_command: str
     gridbtc_command: str
     alert: bool
@@ -103,10 +127,15 @@ def compute_derived_fields(
     staleness: StalenessPolicy = DEFAULT_STALENESS,
     gridbtc_action: GridBtcHighVolAction = DEFAULT_GRIDBTC_ACTION,
 ) -> DerivedFields:
-    """Osservazione stateless via le stesse componenti pure e già approvate
-    del wiring-loop (non le reimplementa). `sequencer` è di proprietà del
-    chiamante — la sua storia determina se compare un `alert_category`
-    (edge-triggered, come nel wiring-loop reale)."""
+    """Osservazione via le stesse componenti pure e già approvate del
+    wiring-loop (non le reimplementa): `resolve_wiring_decision` è
+    stateless (nessuna memoria tra chiamate), ma `sequencer.process` è
+    STATEFUL — la sua storia (di proprietà del chiamante) determina se
+    `alert_category` compare su questa riga (edge-triggered, vedi
+    `DerivedFields`). Per questo un riavvio del collector (sequencer
+    fresco) potrebbe iniettare una transizione spuria nella prima riga
+    post-riavvio se non "scaldato" prima — vedi `_warm_up_sequencer`,
+    chiamata da `run_loop` prima di entrare nel ciclo."""
     decision = resolve_wiring_decision(
         snapshot, now=now, staleness=staleness, gridbtc_high_vol_action=gridbtc_action
     )
@@ -191,6 +220,27 @@ class HistoryStore:
         row = self._conn.execute("SELECT value FROM _meta WHERE key = 'last_new_row_at'").fetchone()
         return _parse_iso(row[0]) if row else None
 
+    def latest_row(self) -> LatestRow | None:
+        """Ultima riga persistita per `snapshot_timestamp` (ordine
+        cronologico del regime, non dell'orario di poll del collector —
+        le stringhe ISO 8601 UTC a lunghezza fissa già in uso in questo
+        repo ordinano lessicograficamente come cronologicamente). Usata
+        solo per lo "scaldamento" del sequencer al riavvio, vedi
+        `_warm_up_sequencer`."""
+        row = self._conn.execute(
+            "SELECT snapshot_timestamp, btc_high_vol, eth_high_vol, eth_harvester_on, collected_at "
+            "FROM regime_history ORDER BY snapshot_timestamp DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return None
+        return LatestRow(
+            snapshot_timestamp=row[0],
+            btc_high_vol=bool(row[1]),
+            eth_high_vol=bool(row[2]),
+            eth_harvester_on=bool(row[3]),
+            collected_at=_parse_iso(row[4]),
+        )
+
     def _set_last_new_row_at(self, when: datetime) -> None:
         self._conn.execute(
             "INSERT INTO _meta (key, value) VALUES ('last_new_row_at', ?) "
@@ -246,6 +296,30 @@ class HistoryStore:
         self._conn.close()
 
 
+def _warm_up_sequencer(history: HistoryStore, sequencer: WiringSequencer) -> None:
+    """Finding review indipendente: un `sequencer` fresco (contratto di
+    riavvio già documentato per `WiringSequencer`, ADR-037 §9) riemetterebbe
+    la categoria dello stato corrente come se fosse una transizione — per
+    un alert Telegram è innocuo (effimero), ma qui finirebbe PERMANENTE
+    nella storia persistita, indistinguibile da una transizione reale.
+
+    Fix SENZA toccare `WiringSequencer` (vincolo sovrano: nessuna modifica
+    a componenti condivisi coi processi in shadow): lo si guida attraverso
+    la sua stessa API pubblica (`process`) con l'ultima riga già
+    persistita da questo collector, scartando il risultato — puro
+    "scaldamento", nessuna scrittura, nessun side effect osservabile."""
+    latest = history.latest_row()
+    if latest is None:
+        return
+    reconstructed = RegimeSnapshot(
+        timestamp=latest.snapshot_timestamp,
+        btc_high_vol=latest.btc_high_vol,
+        eth_high_vol=latest.eth_high_vol,
+        eth_harvester_on=latest.eth_harvester_on,
+    )
+    compute_derived_fields(reconstructed, sequencer, now=latest.collected_at)
+
+
 def run_once(
     store: RegimeStateStore,
     history: HistoryStore,
@@ -286,17 +360,41 @@ def run_loop(
     legge, ma la storia non cresce da più di `alive_but_blind_threshold`.
     In quel caso: alert dedicato (testo distinguibile da un ciclo fallito),
     niente ping — stesso principio "il ping conferma solo che il lavoro
-    utile è stato fatto", non solo che il processo è vivo."""
+    utile è stato fatto", non solo che il processo è vivo.
+
+    Prima di entrare nel ciclo: `record_collection_start` (idempotente) e
+    `_warm_up_sequencer` (evita transizioni spurie permanenti al riavvio,
+    vedi la funzione)."""
     now0 = now_fn()
     history.record_collection_start(now0)
+    _warm_up_sequencer(history, sequencer)
 
     iteration = 0
     while max_iterations is None or iteration < max_iterations:
         now = now_fn()
         try:
             run_once(store, history, sequencer, now=now)
-            reference = history.last_new_row_at() or history.collection_started_at() or now
-            if is_alive_but_blind(reference, now, alive_but_blind_threshold):
+            reference = history.last_new_row_at() or history.collection_started_at()
+            if reference is None:
+                # Invariante violato: record_collection_start è già girato
+                # prima del ciclo, quindi collection_started_at() non
+                # dovrebbe MAI essere None qui dentro. Un fallback silenzioso
+                # a `now` (età 0) mascondererebbe l'anomalia invece di
+                # segnalarla — finding review indipendente (3).
+                message = (
+                    "COLLECTOR GUASTO — history-collector: metadati persi "
+                    "(né last_new_row_at né collection_started_at presenti in _meta, "
+                    "invariante violato — non dovrebbe mai accadere dopo l'avvio)."
+                )
+                try:
+                    alert_sink.send(message)
+                except Exception as alert_exc:  # noqa: BLE001 - mai propagare da qui
+                    print(
+                        f"[history-collector] impossibile inviare l'alert di metadati persi: "
+                        f"{alert_exc!r}",
+                        file=sys.stderr,
+                    )
+            elif is_alive_but_blind(reference, now, alive_but_blind_threshold):
                 message = (
                     "STORIA FERMA — history-collector: nessuna riga nuova da "
                     f"{now - reference} (soglia {alive_but_blind_threshold}). Il processo gira "

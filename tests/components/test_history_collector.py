@@ -298,6 +298,186 @@ def test_run_loop_fires_alive_but_blind_and_skips_ping_when_history_stalls(tmp_p
     assert "STORIA FERMA" in alert_sink.sent[0]
 
 
+def test_run_loop_fires_alive_but_blind_when_snapshot_never_written(tmp_path):
+    """Copertura mancante segnalata dal reviewer: il caso 'nessuno snapshot
+    mai scritto' deve comunque far scattare STORIA FERMA oltre soglia, non
+    solo il caso 'snapshot invariato'. Verificato empiricamente dal
+    reviewer ma senza test dedicato — lo aggiungo qui."""
+    regime_store = RegimeStateStore(tmp_path / "regime")  # mai scritto
+    history = HistoryStore(tmp_path / "history.db")
+    alert_sink = RecordingAlertSink()
+    healthcheck_sink = RecordingHealthcheckSink()
+
+    run_loop(
+        regime_store,
+        history,
+        _sequencer(),
+        alert_sink,
+        healthcheck_sink,
+        poll_interval=timedelta(minutes=5),
+        alive_but_blind_threshold=timedelta(minutes=60),
+        max_iterations=1,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: NOW,
+    )
+    assert healthcheck_sink.ping_count == 1  # entro soglia, nessuna riga ancora attesa
+    assert alert_sink.sent == []
+
+    run_loop(
+        regime_store,
+        history,
+        _sequencer(),
+        alert_sink,
+        healthcheck_sink,
+        poll_interval=timedelta(minutes=5),
+        alive_but_blind_threshold=timedelta(minutes=60),
+        max_iterations=1,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: NOW + timedelta(minutes=61),
+    )
+    assert healthcheck_sink.ping_count == 1
+    assert len(alert_sink.sent) == 1
+    assert "STORIA FERMA" in alert_sink.sent[0]
+
+
+def test_restart_does_not_inject_spurious_transition_when_state_unchanged(tmp_path):
+    """Finding review indipendente (5): un riavvio del collector (nuovo
+    WiringSequencer fresco, stesso contratto di wiring_loop) non deve
+    iniettare una transizione derived_alert_category SPURIA — e
+    PERMANENTE, a differenza di un alert Telegram effimero — in una riga
+    persistita, se lo stato di regime non e' davvero cambiato nel
+    frattempo. Fix: run_loop 'scalda' il sequencer fresco rileggendo
+    l'ultima riga gia' persistita (non tocca WiringSequencer)."""
+    regime_store = RegimeStateStore(tmp_path / "regime")
+    history = HistoryStore(tmp_path / "history.db")
+
+    # Storia pregressa: gia' in DEFENSIVE, riga gia' scritta da un
+    # "collector precedente" (sequencer che ha visto la transizione vera).
+    first_snapshot = build_snapshot(False, True, True, now=NOW)
+    previous_run_sequencer = _sequencer()
+    derived_before = compute_derived_fields(first_snapshot, previous_run_sequencer, now=NOW)
+    history.insert_snapshot_row(first_snapshot, collected_at=NOW, derived=derived_before)
+    assert derived_before.alert_category == AlertCategory.LAYER_LAVORA_DIFENSIVA.value
+
+    # "Riavvio": stesso stato di regime (ancora DEFENSIVE), sequencer fresco.
+    later = NOW + timedelta(minutes=15)
+    second_snapshot = build_snapshot(False, True, True, now=later)
+    regime_store.write(second_snapshot)
+    fresh_sequencer = _sequencer()
+
+    run_loop(
+        regime_store,
+        history,
+        fresh_sequencer,
+        RecordingAlertSink(),
+        RecordingHealthcheckSink(),
+        poll_interval=timedelta(minutes=5),
+        max_iterations=1,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: later,
+    )
+
+    row = history._conn.execute(  # noqa: SLF001
+        "SELECT derived_alert_category FROM regime_history WHERE snapshot_timestamp = ?",
+        (second_snapshot.timestamp,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None, "il riavvio ha iniettato una transizione spuria nella storia persistita"
+
+
+def test_restart_still_detects_genuine_transition_after_warmup(tmp_path):
+    """Il warm-up non deve mascherare una transizione VERA avvenuta durante
+    il downtime del collector — solo evitare quelle spurie dovute al solo
+    riavvio del sequencer."""
+    regime_store = RegimeStateStore(tmp_path / "regime")
+    history = HistoryStore(tmp_path / "history.db")
+
+    first_snapshot = build_snapshot(False, False, True, now=NOW)  # NORMAL
+    derived_before = compute_derived_fields(first_snapshot, _sequencer(), now=NOW)
+    history.insert_snapshot_row(first_snapshot, collected_at=NOW, derived=derived_before)
+    assert derived_before.alert_category is None
+
+    later = NOW + timedelta(minutes=15)
+    second_snapshot = build_snapshot(False, True, True, now=later)  # ora DEFENSIVE per davvero
+    regime_store.write(second_snapshot)
+
+    run_loop(
+        regime_store,
+        history,
+        _sequencer(),
+        RecordingAlertSink(),
+        RecordingHealthcheckSink(),
+        poll_interval=timedelta(minutes=5),
+        max_iterations=1,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: later,
+    )
+
+    row = history._conn.execute(  # noqa: SLF001
+        "SELECT derived_alert_category FROM regime_history WHERE snapshot_timestamp = ?",
+        (second_snapshot.timestamp,),
+    ).fetchone()
+    assert row[0] == AlertCategory.LAYER_LAVORA_DIFENSIVA.value
+
+
+class _BothAnchorsNoneHistory:
+    """Test double: forza `collection_started_at`/`last_new_row_at` a
+    restituire sempre `None`, per esercitare il ramo di `run_loop` che
+    tratta l'invariante violato — con un `HistoryStore` reale non è
+    riproducibile dentro `run_loop`, che lo ripara da solo chiamando
+    `record_collection_start` (idempotente) prima di ogni ciclo. Il punto
+    del test è verificare la gestione del caso, non la sua plausibilità."""
+
+    def __init__(self, real: HistoryStore) -> None:
+        self._real = real
+
+    def record_collection_start(self, now: datetime) -> None:
+        self._real.record_collection_start(now)
+
+    def last_new_row_at(self):
+        return None
+
+    def collection_started_at(self):
+        return None
+
+    def latest_row(self):
+        return self._real.latest_row()
+
+    def insert_snapshot_row(self, snapshot, collected_at, derived) -> bool:
+        return self._real.insert_snapshot_row(snapshot, collected_at, derived)
+
+
+def test_alive_but_blind_reference_missing_both_anchors_alerts_instead_of_masking(tmp_path):
+    """Finding review indipendente (3): se, dentro il ciclo, sia
+    last_new_row_at sia collection_started_at risultano assenti (invariante
+    violato), il fallback silenzioso a `now` mascondererebbe l'anomalia
+    (età 0, mai allertata). Deve invece allertare esplicitamente, non
+    pingare — verificato con un doppio dedicato, vedi
+    `_BothAnchorsNoneHistory`."""
+    regime_store = RegimeStateStore(tmp_path / "regime")
+    regime_store.write(build_snapshot(False, False, True, now=NOW))
+    history = _BothAnchorsNoneHistory(HistoryStore(tmp_path / "history.db"))
+
+    alert_sink = RecordingAlertSink()
+    healthcheck_sink = RecordingHealthcheckSink()
+
+    run_loop(
+        regime_store,
+        history,
+        _sequencer(),
+        alert_sink,
+        healthcheck_sink,
+        poll_interval=timedelta(minutes=5),
+        max_iterations=1,
+        sleep_fn=lambda s: None,
+        now_fn=lambda: NOW,
+    )
+
+    assert healthcheck_sink.ping_count == 0
+    assert len(alert_sink.sent) == 1
+    assert "COLLECTOR GUASTO" in alert_sink.sent[0]
+
+
 # --- build_sinks (stesso contratto degli altri due entrypoint) -------------
 
 
