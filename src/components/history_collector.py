@@ -13,17 +13,34 @@ non avrebbe alcuna serie storica su cui basarsi.
 
 Schema (vedi `HistoryStore.init_schema`): colonne FATTO sono i campi dello
 snapshot così come letti (`btc_high_vol`, `eth_high_vol`,
-`eth_harvester_on`); colonne `derived_*` sono un'INFERENZA STATELESS
-ricalcolata da questo collector, con la propria istanza di
-`WiringSequencer`, richiamando le stesse funzioni pure e già approvate del
-wiring-loop (`resolve_wiring_decision`, `WiringSequencer.process`) in sola
-osservazione. Queste due categorie POSSONO LEGITTIMAMENTE DIVERGERE dal
-comportamento del wiring-loop reale in quello stesso istante — storia del
-sequencer diversa (restart in momenti diversi), cadenza di poll diversa,
-eventuali versioni di codice diverse. **La verità sugli alert REALMENTE
-inviati resta il canale Telegram**: una divergenza rilevata leggendo
-questa storia al gate è un finding da investigare, non un bug della
-dashboard che la legge.
+`eth_harvester_on`); colonne `derived_*` sono un'INFERENZA ricalcolata da
+questo collector, con la propria istanza di `WiringSequencer`, richiamando
+le stesse funzioni pure e già approvate del wiring-loop
+(`resolve_wiring_decision`, `WiringSequencer.process`) in sola
+osservazione — `harvester_command`/`gridbtc_command`/`alert` in modo
+STATELESS (da `resolve_wiring_decision`, nessuna memoria tra chiamate),
+`alert_category`/`alert_text` in modo STATEFUL/edge-triggered (dal
+sequencer, vedi `DerivedFields`). Queste colonne POSSONO LEGITTIMAMENTE
+DIVERGERE dal comportamento del wiring-loop reale in quello stesso istante
+— storia del sequencer diversa (restart in momenti diversi), cadenza di
+poll diversa, eventuali versioni di codice diverse. **La verità sugli
+alert REALMENTE inviati resta il canale Telegram**: una divergenza
+rilevata leggendo questa storia al gate è un finding da investigare, non
+un bug della dashboard che la legge.
+
+**Limite noto del warm-up al riavvio (`_warm_up_sequencer`):** ricostruisce
+correttamente la sola CATEGORIZZAZIONE level-triggered (DIFENSIVA/CIECO/
+RIENTRO/NONE) dall'ultima riga persistita, per qualunque categoria — ma
+NON la memoria di rate-limit/instabilità (`_transition_times` interno al
+sequencer), che è persa ad ogni riavvio del collector. Conseguenza: un
+riavvio che capiti esattamente a ridosso di una sequenza di flip-flop già
+vicina alla soglia di `LAYER_INSTABILE` può **sotto-segnalare**
+un'instabilità reale nella riga immediatamente successiva (l'opposto del
+difetto originale — qui si perde un segnale vero, non se ne inietta uno
+falso). Probabilità bassa, non bloccante, ma dichiarata esplicitamente: se
+l'istruttoria del gate nota un conteggio di instabilità sospettosamente
+basso a cavallo di un riavvio/deploy del collector, è questa la causa da
+verificare per prima.
 
 Pattern di storage riusato da `copy-selector` (repo isolato, archiviato,
 "designato al riuso" — solo il PATTERN, non il codice, per policy di
