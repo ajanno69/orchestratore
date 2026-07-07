@@ -200,3 +200,53 @@ punto di guasto in un componente il cui scopo è il fail-safe su dati inaffidabi
 executor che trattasse un comando come azione one-shot (es. `GridBtcCommand.HIGH_VOL_CLOSE_GRID_ORDERLY`,
 già nell'enum, letto come "esegui la chiusura ORA") romperebbe questa assunzione — collegarlo senza
 prima renderlo idempotente è un incidente di governance ADR-037, non un bug qualunque.
+
+## 10. Entrypoint runtime: due processi, cadenze, contratto dry-run (pre-registrato, 2026-07-06)
+
+Sessione pre-deploy (repo-only, nessun deploy, nessuna chiave reale). Decisioni fissate qui prima
+di scrivere il codice — non emergenti dall'implementazione.
+
+**Due processi separati, non uno.** `regime-daemon` (misura: candele OKX via ccxt → EWMA →
+macchina a stati → `RegimeSnapshot` persistito) e `wiring-loop` (decisione: snapshot → comando →
+alert). Il fail-safe di staleness (§3) presuppone esplicitamente questo disaccoppiamento: se i due
+ruoli vivessero nello stesso processo, un blocco nel calcolo di misura fermerebbe anche la
+capacità di dichiararsi "cieco", vanificando il fail-safe. Due unit systemd separate (vedi
+`docs/m2-deploy-runbook.md`, aggiornato di conseguenza).
+
+**Cadenza di polling — pre-registrata, non lasciata a un default implicito del codice:**
+- `regime-daemon`: **15 minuti**. Margine di 4x sotto la soglia di staleness già approvata
+  (`max_age=1h`, Task 1/checkpoint 2) — tollera un singolo ciclo perso (es. un timeout OKX
+  transitorio) senza far scattare il fail-safe di staleness lato wiring. Più frequente sarebbe
+  inutile (vol/funding sono segnali di regime lenti, non un segnale di trading ad alta frequenza);
+  più raro eroderebbe il margine sotto la soglia di staleness.
+- `wiring-loop`: **5 minuti**. Legge solo un file locale (nessuna chiamata di rete), quindi un
+  polling più frequente del daemon non ha controindicazioni — dà propagazione rapida di
+  comandi/alert una volta che il daemon scrive un nuovo snapshot, senza introdurre alcun costo di
+  rete o rischio di rate-limit su un exchange.
+- **Finestra di lookback per l'EWMA**: `regime-daemon` rifetcha le ultime **200 candele
+  giornaliere** (via `ccxt.fetch_ohlcv(..., timeframe="1d", limit=200)`, nessun `since`) a ogni
+  ciclo, non l'intera storia dal 2019. `pandas.ewm(span=32)` è un filtro ricorsivo il cui peso
+  decade esponenzialmente — a 200 giorni (~6x lo span) il contributo di osservazioni più vecchie è
+  numericamente trascurabile: 200 candele sono un'approssimazione a precisione pratica della
+  "storia intera" usata in M1.5 per la calibrazione, senza rifetchare migliaia di candele a ogni
+  ciclo da 15 minuti.
+
+**Contratto dry-run — cosa è iniettabile e cosa no.** I canali ESTERNI con credenziali reali
+(Telegram, healthchecks.io) vivono dietro un'interfaccia (`src/alerting/`) con un doppione
+dry-run: entrambi gli entrypoint devono girare end-to-end in locale con `--dry-run`, senza alcun
+token reale. **I dati di mercato NON sono dietro dry-run**: `regime-daemon` in `--dry-run` esegue
+comunque fetch reali verso gli endpoint pubblici OKX (nessuna chiave, nessun costo, nessun rischio
+— stessi endpoint già usati in M1.5) — fingere anche quelli vanificherebbe lo smoke test locale
+come verifica della pipeline di misura vera. La suite pytest, diversamente, non deve MAI dipendere
+da rete reale: i test di `regime_daemon` iniettano un client `exchange` fittizio (stub), mai
+`ccxt.okx()` vero.
+
+**Contratto di riavvio, verificato non solo dichiarato.** `wiring-loop` eredita il contratto già
+scritto in `WiringSequencer` (§9): un nuovo processo crea una nuova istanza, riemette lo stato
+corrente al primo ciclo — nessuna azione di codice aggiuntiva necessaria, ma un test deve
+verificare che l'entrypoint costruisca davvero un `WiringSequencer` fresco a ogni avvio (non un
+singleton persistito per errore). `regime-daemon` eredita invece il pattern
+`resolve_initial_snapshot` di M1 (`regime.store`): all'avvio, gli stati `VolRegimeState`/
+`FundingRegimeState` DEVONO essere seminati dall'ultimo snapshot persistito (se esiste), non dal
+default `False` della dataclass — un test deve verificare che l'entrypoint chiami davvero
+`resolve_initial_snapshot`, non solo che il modulo `regime.store` lo offra.
