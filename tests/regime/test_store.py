@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from regime.store import RegimeStateStore, build_snapshot, resolve_initial_snapshot
+from regime.store import RegimeSnapshot, RegimeStateStore, build_snapshot, resolve_initial_snapshot
 from regime.vol_state import VolRegimeState, VolStateConfig
 
 
@@ -15,6 +15,46 @@ def test_build_snapshot_formats_timestamp_iso_utc():
     assert snap.btc_high_vol is True
     assert snap.eth_high_vol is False
     assert snap.eth_harvester_on is True
+    assert snap.btc_ewma_vol is None
+    assert snap.eth_ewma_vol is None
+
+
+def test_build_snapshot_accepts_optional_ewma_vol_values():
+    """Prep schema post-gate (Parte 2, 2026-07-07): il daemon calcola questi
+    valori a ogni ciclo ma finora non li persisteva mai — vedi
+    docs/m2-shadow-dashboard-rendering-report-2026-07-07.md §4. Campi
+    opzionali, mai deployati prima del gate 21/07 (vedi ADR-037)."""
+    snap = build_snapshot(
+        True, False, True, now=datetime(2026, 7, 5, 12, 30, 0), btc_ewma_vol=0.91, eth_ewma_vol=0.42
+    )
+    assert snap.btc_ewma_vol == 0.91
+    assert snap.eth_ewma_vol == 0.42
+
+
+def test_snapshot_from_dict_backward_compatible_when_ewma_vol_fields_missing():
+    """Uno snapshot scritto dal codice PRIMA di questa modifica (es. il file
+    reale sul VPS, mai toccato prima del gate) non ha queste chiavi —
+    from_dict deve leggerlo comunque, con i nuovi campi a None, non sollevare."""
+    raw = {
+        "timestamp": "2026-07-05T12:30:00Z",
+        "btc_high_vol": True,
+        "eth_high_vol": False,
+        "eth_harvester_on": True,
+    }
+    snap = RegimeSnapshot.from_dict(raw)
+    assert snap.btc_ewma_vol is None
+    assert snap.eth_ewma_vol is None
+
+
+def test_snapshot_roundtrip_preserves_ewma_vol_values(tmp_path):
+    store = RegimeStateStore(tmp_path)
+    snap = build_snapshot(
+        True, True, False, now=datetime(2026, 7, 5, 0, 0, 0), btc_ewma_vol=0.75, eth_ewma_vol=1.02
+    )
+    store.write(snap)
+    loaded = store.read()
+    assert loaded.btc_ewma_vol == 0.75
+    assert loaded.eth_ewma_vol == 1.02
 
 
 def test_store_write_then_read_roundtrip(tmp_path):

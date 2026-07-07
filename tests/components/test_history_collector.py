@@ -60,6 +60,106 @@ def test_insert_snapshot_row_first_time_returns_true_and_is_queryable(tmp_path):
     assert row == (0, 1, 1, "defensive")
 
 
+def test_init_schema_adds_ewma_vol_columns_to_regime_history(tmp_path):
+    store = HistoryStore(tmp_path / "history.db")
+    columns = {
+        row[1]
+        for row in store._conn.execute("PRAGMA table_info(regime_history)").fetchall()  # noqa: SLF001
+    }
+    assert "btc_ewma_vol" in columns
+    assert "eth_ewma_vol" in columns
+
+
+def test_init_schema_migration_is_idempotent_on_pre_existing_db_without_vol_columns(tmp_path):
+    """Prep schema post-gate (Parte 2, 2026-07-07): il DB reale sul VPS è
+    stato creato da codice PRIMA di questa modifica (nessuna colonna vol).
+    Riaprire quel DB (stesso file, `init_schema` rieseguito al costruttore)
+    non deve fallire — la migrazione additiva `ALTER TABLE ADD COLUMN` va
+    guardata con `PRAGMA table_info` per non essere ritentata (SQLite
+    solleva se la colonna esiste già) e non deve toccare le righe già
+    presenti."""
+    db_path = tmp_path / "history.db"
+    import sqlite3
+
+    pre_existing = sqlite3.connect(str(db_path))
+    pre_existing.execute(
+        """
+        CREATE TABLE regime_history (
+            snapshot_timestamp        TEXT PRIMARY KEY,
+            btc_high_vol               INTEGER NOT NULL,
+            eth_high_vol               INTEGER NOT NULL,
+            eth_harvester_on           INTEGER NOT NULL,
+            collected_at               TEXT NOT NULL,
+            derived_harvester_command  TEXT NOT NULL,
+            derived_gridbtc_command    TEXT NOT NULL,
+            derived_alert              INTEGER NOT NULL,
+            derived_alert_category     TEXT,
+            derived_alert_text         TEXT
+        )
+        """
+    )
+    pre_existing.execute(
+        "INSERT INTO regime_history VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (
+            "2026-07-07T09:00:00Z",
+            0,
+            0,
+            0,
+            "2026-07-07T09:00:05Z",
+            "normal",
+            "normal",
+            0,
+            None,
+            None,
+        ),
+    )
+    pre_existing.commit()
+    pre_existing.close()
+
+    store = HistoryStore(db_path)  # init_schema() rieseguito qui, sullo stesso file
+
+    columns = {
+        row[1]
+        for row in store._conn.execute("PRAGMA table_info(regime_history)").fetchall()  # noqa: SLF001
+    }
+    assert "btc_ewma_vol" in columns
+    count = store._conn.execute("SELECT COUNT(*) FROM regime_history").fetchone()[0]  # noqa: SLF001
+    assert count == 1  # riga pre-esistente intatta, non persa dalla migrazione
+
+
+def test_insert_snapshot_row_persists_ewma_vol_values(tmp_path):
+    store = HistoryStore(tmp_path / "history.db")
+    snapshot = build_snapshot(
+        False, False, True, now=NOW, btc_ewma_vol=0.62, eth_ewma_vol=1.01
+    )
+    derived = compute_derived_fields(snapshot, _sequencer(), now=NOW)
+
+    store.insert_snapshot_row(snapshot, collected_at=NOW, derived=derived)
+
+    row = store._conn.execute(  # noqa: SLF001
+        "SELECT btc_ewma_vol, eth_ewma_vol FROM regime_history WHERE snapshot_timestamp = ?",
+        (snapshot.timestamp,),
+    ).fetchone()
+    assert row == (0.62, 1.01)
+
+
+def test_insert_snapshot_row_persists_null_ewma_vol_when_snapshot_lacks_it(tmp_path):
+    """Backward-compat: uno snapshot letto da un `regime_state.json` scritto
+    da codice pre-migrazione (campi assenti -> None, vedi test_store.py) non
+    deve far fallire l'insert — la colonna resta NULL."""
+    store = HistoryStore(tmp_path / "history.db")
+    snapshot = build_snapshot(False, False, True, now=NOW)  # btc_ewma_vol/eth_ewma_vol default None
+    derived = compute_derived_fields(snapshot, _sequencer(), now=NOW)
+
+    store.insert_snapshot_row(snapshot, collected_at=NOW, derived=derived)
+
+    row = store._conn.execute(  # noqa: SLF001
+        "SELECT btc_ewma_vol, eth_ewma_vol FROM regime_history WHERE snapshot_timestamp = ?",
+        (snapshot.timestamp,),
+    ).fetchone()
+    assert row == (None, None)
+
+
 def test_insert_snapshot_row_same_timestamp_twice_dedupes_and_returns_false(tmp_path):
     store = HistoryStore(tmp_path / "history.db")
     snapshot = build_snapshot(False, False, True, now=NOW)

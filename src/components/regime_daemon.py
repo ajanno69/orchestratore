@@ -128,7 +128,14 @@ def run_once(
     funding_rate = funding_source.fetch("ETH")
     eth_harvester_on = states.eth_funding.update(float(funding_rate))
 
-    snapshot = build_snapshot(btc_high_vol, eth_high_vol, eth_harvester_on, now=now)
+    snapshot = build_snapshot(
+        btc_high_vol,
+        eth_high_vol,
+        eth_harvester_on,
+        now=now,
+        btc_ewma_vol=float(btc_vol),
+        eth_ewma_vol=float(eth_vol),
+    )
     store.write(snapshot)
     return snapshot
 

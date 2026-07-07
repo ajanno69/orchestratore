@@ -26,6 +26,13 @@ class RegimeSnapshot:
     btc_high_vol: bool
     eth_high_vol: bool
     eth_harvester_on: bool
+    # Prep schema post-gate (Parte 2, 2026-07-07, deploy SOLO dopo il gate
+    # 21/07 — vedi ADR-037): il daemon calcola questi valori a ogni ciclo
+    # ma finora non li persisteva mai da nessuna parte (nemmeno qui).
+    # Opzionali e default None per restare backward-compatible con
+    # `regime_state.json` reale già scritto sul VPS da codice precedente.
+    btc_ewma_vol: float | None = None
+    eth_ewma_vol: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -37,6 +44,8 @@ class RegimeSnapshot:
             btc_high_vol=data["btc_high_vol"],
             eth_high_vol=data["eth_high_vol"],
             eth_harvester_on=data["eth_harvester_on"],
+            btc_ewma_vol=data.get("btc_ewma_vol"),
+            eth_ewma_vol=data.get("eth_ewma_vol"),
         )
 
 
@@ -66,7 +75,12 @@ class RegimeStateStore:
 
 
 def build_snapshot(
-    btc_high_vol: bool, eth_high_vol: bool, eth_harvester_on: bool, now: datetime | None = None
+    btc_high_vol: bool,
+    eth_high_vol: bool,
+    eth_harvester_on: bool,
+    now: datetime | None = None,
+    btc_ewma_vol: float | None = None,
+    eth_ewma_vol: float | None = None,
 ) -> RegimeSnapshot:
     ts = (now or datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
     return RegimeSnapshot(
@@ -74,6 +88,8 @@ def build_snapshot(
         btc_high_vol=btc_high_vol,
         eth_high_vol=eth_high_vol,
         eth_harvester_on=eth_harvester_on,
+        btc_ewma_vol=btc_ewma_vol,
+        eth_ewma_vol=eth_ewma_vol,
     )
 
 

@@ -215,6 +215,23 @@ class HistoryStore:
             )
             """
         )
+        self._migrate_add_ewma_vol_columns()
+
+    def _migrate_add_ewma_vol_columns(self) -> None:
+        """Prep schema post-gate (Parte 2, 2026-07-07, deploy SOLO dopo il
+        gate 21/07 — vedi ADR-037): migrazione ADDITIVA, mai distruttiva —
+        `ALTER TABLE ADD COLUMN` non tocca le righe già presenti, resta
+        NULL su quelle vecchie (coerente con `RegimeSnapshot.btc_ewma_vol`
+        opzionale a None per backward-compat, vedi regime/store.py).
+        Guardata via `PRAGMA table_info` invece di riprovare l'ALTER e
+        ignorare l'errore: SQLite solleva `OperationalError` se la colonna
+        esiste già, e un except largo qui nasconderebbe anche un errore
+        di sintassi reale — meglio verificare esplicitamente."""
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(regime_history)")}
+        if "btc_ewma_vol" not in existing:
+            self._conn.execute("ALTER TABLE regime_history ADD COLUMN btc_ewma_vol REAL")
+        if "eth_ewma_vol" not in existing:
+            self._conn.execute("ALTER TABLE regime_history ADD COLUMN eth_ewma_vol REAL")
 
     def record_collection_start(self, now: datetime) -> None:
         """Idempotente: mai sovrascritto dopo la prima chiamata riuscita —
@@ -275,8 +292,9 @@ class HistoryStore:
             INSERT OR IGNORE INTO regime_history (
                 snapshot_timestamp, btc_high_vol, eth_high_vol, eth_harvester_on,
                 collected_at, derived_harvester_command, derived_gridbtc_command,
-                derived_alert, derived_alert_category, derived_alert_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                derived_alert, derived_alert_category, derived_alert_text,
+                btc_ewma_vol, eth_ewma_vol
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snapshot.timestamp,
@@ -289,6 +307,8 @@ class HistoryStore:
                 int(derived.alert),
                 derived.alert_category,
                 derived.alert_text,
+                snapshot.btc_ewma_vol,
+                snapshot.eth_ewma_vol,
             ),
         )
         inserted = cursor.rowcount > 0

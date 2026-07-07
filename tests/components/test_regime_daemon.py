@@ -120,6 +120,37 @@ def test_run_once_updates_states_and_persists_snapshot(tmp_path):
     assert persisted == snapshot
 
 
+def test_run_once_persists_numeric_ewma_vol_values(tmp_path):
+    """Prep schema post-gate (Parte 2, 2026-07-07): finding di sessione, il
+    valore numerico EWMA vol veniva calcolato ogni ciclo e mai persistito
+    (vedi docs/m2-shadow-dashboard-rendering-report-2026-07-07.md §4). Da
+    ora lo snapshot lo porta con sé — campo repo-only, deploy solo dopo il
+    gate 21/07."""
+    daily_return = 0.02
+    exchange = FakeExchange(
+        {
+            "BTC/USDT": make_candles(200, daily_return),
+            "ETH/USDT": make_candles(200, daily_return),
+        }
+    )
+    funding_source = FakeFundingSource(rate=0.0001)
+    store = RegimeStateStore(tmp_path)
+    states = RegimeDaemonStates.seeded_from(
+        build_snapshot(False, False, False, now=NOW), REGIME_CONFIG
+    )
+
+    snapshot = run_once(exchange, funding_source, states, store, now=NOW)
+
+    expected_vol = vol_for_daily_return(daily_return)
+    assert snapshot.btc_ewma_vol is not None
+    assert snapshot.eth_ewma_vol is not None
+    assert abs(snapshot.btc_ewma_vol - expected_vol) < 1e-9
+    assert abs(snapshot.eth_ewma_vol - expected_vol) < 1e-9
+    persisted = store.read()
+    assert persisted.btc_ewma_vol == snapshot.btc_ewma_vol
+    assert persisted.eth_ewma_vol == snapshot.eth_ewma_vol
+
+
 def test_run_once_propagates_fetch_failure_without_writing_snapshot(tmp_path):
     store = RegimeStateStore(tmp_path)
     states = RegimeDaemonStates.seeded_from(
