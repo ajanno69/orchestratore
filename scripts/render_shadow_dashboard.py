@@ -21,8 +21,30 @@ from dashboard.export import export_history_db  # noqa: E402
 from dashboard.queries import load_meta, load_rows, load_rows_by_insertion_order  # noqa: E402
 from dashboard.render import render_html  # noqa: E402
 from dashboard.sanity import run_all_checks  # noqa: E402
+from dashboard.vol_reconstruction import VolSeries, reconstruct_vol_series  # noqa: E402
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "var" / "dashboard-output"
+
+
+def _fetch_vol_reconstruction(config_path: str) -> dict[str, VolSeries]:
+    """Fetch pubblico OKX indipendente + ricalcolo con lo stimatore già
+    approvato (vedi `dashboard.vol_reconstruction`). Fallimento di rete/
+    ccxt non deve far cadere l'intero render: il resto della dashboard
+    (dati reali già raccolti dal collector) resta prezioso comunque —
+    la sezione vol degrada alla nota sul limite dichiarato."""
+    import ccxt
+
+    from regime.config import load_regime_config
+
+    regime_config = load_regime_config(config_path)
+    exchange = ccxt.okx()
+    series_by_asset: dict[str, VolSeries] = {}
+    for asset in regime_config.vol_by_asset:
+        try:
+            series_by_asset[asset] = reconstruct_vol_series(exchange, asset, regime_config)
+        except Exception as exc:  # noqa: BLE001 — degradazione, non un crash della dashboard
+            print(f"  [avviso] ricostruzione ex-post vol {asset} fallita: {exc}")
+    return series_by_asset
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -40,6 +62,16 @@ def main(argv: list[str] | None = None) -> None:
         help="se fornito, salta l'export via SSH e usa direttamente questo file locale",
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_DIR / "dashboard.html"))
+    parser.add_argument(
+        "--regime-config",
+        default="config/regime.yaml",
+        help="usato SOLO per la ricostruzione ex-post della vol (stessi span/soglie del daemon)",
+    )
+    parser.add_argument(
+        "--skip-vol-reconstruction",
+        action="store_true",
+        help="salta il fetch OKX indipendente per il grafico vol ex-post",
+    )
     args = parser.parse_args(argv)
 
     if args.local_db_path:
@@ -69,7 +101,13 @@ def main(argv: list[str] | None = None) -> None:
     for finding in findings:
         print(f"  [{finding.severity}] {finding.check}: {finding.message}")
 
-    html = render_html(rows, rows_by_insertion, meta, findings)
+    vol_series_by_asset: dict[str, VolSeries] = {}
+    if not args.skip_vol_reconstruction:
+        print("Ricostruzione ex-post vol (fetch OKX indipendente) ...")
+        vol_series_by_asset = _fetch_vol_reconstruction(args.regime_config)
+        print(f"  asset ricostruiti: {sorted(vol_series_by_asset)}")
+
+    html = render_html(rows, rows_by_insertion, meta, findings, vol_series_by_asset)
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pandas as pd
+
 from dashboard.queries import HistoryRow
 from dashboard.render import (
     build_header_summary,
     render_html,
     render_staleness_png,
     render_state_timeline_png,
+    render_vol_reconstruction_png,
 )
 from dashboard.sanity import SanityFinding
+from dashboard.vol_reconstruction import VolSeries
 
 BASE = datetime(2026, 7, 7, 12, 0, 0)
 
@@ -100,10 +104,55 @@ def test_render_html_shows_no_anomalies_message_when_findings_empty():
     assert "nessuna anomalia" in html.lower()
 
 
-def test_render_html_declares_missing_numeric_vol_series():
-    """Finding di sessione: lo schema attuale non persiste il valore
-    numerico dell'EWMA vol, solo lo stato booleano - il grafico "vol nel
-    tempo con soglie" richiesto non e' costruibile con i dati disponibili.
-    Deve essere dichiarato in modo prominente nell'HTML, non taciuto."""
+def test_render_html_declares_missing_numeric_vol_series_when_no_reconstruction_given():
+    """Finding di sessione: senza una ricostruzione ex-post fornita, resta
+    dichiarato che il daemon non persiste il valore osservato."""
     html = render_html([_row(0)], [_row(0)], {"collection_started_at": BASE}, [])
     assert "valore numerico" in html.lower() or "vol numerica" in html.lower()
+
+
+# --- ricostruzione ex-post della vol (richiesta successiva) -----------------
+
+
+def _vol_series(asset: str, values: list[float]) -> VolSeries:
+    index = pd.date_range("2026-06-01", periods=len(values), freq="D")
+    return VolSeries(
+        asset=asset,
+        vol=pd.Series(values, index=index),
+        enter_threshold=0.87 if asset == "BTC" else 0.99,
+        exit_threshold=0.59 if asset == "BTC" else 0.83,
+    )
+
+
+def test_render_vol_reconstruction_png_returns_nonempty_png_bytes():
+    series = {
+        "BTC": _vol_series("BTC", [0.3, 0.5, 0.9, 0.6]),
+        "ETH": _vol_series("ETH", [0.4, 0.6, 1.1, 0.7]),
+    }
+    png = render_vol_reconstruction_png(series)
+    assert isinstance(png, bytes)
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_render_vol_reconstruction_png_handles_empty_dict_without_raising():
+    png = render_vol_reconstruction_png({})
+    assert isinstance(png, bytes)
+
+
+def test_render_html_with_vol_reconstruction_shows_ex_post_label_and_thresholds():
+    rows = [_row(0), _row(15)]
+    vol_series_by_asset = {
+        "BTC": _vol_series("BTC", [0.3, 0.5, 0.9]),
+        "ETH": _vol_series("ETH", [0.4, 0.6, 1.1]),
+    }
+
+    html = render_html(
+        rows, rows, {"collection_started_at": BASE}, [], vol_series_by_asset=vol_series_by_asset
+    )
+
+    assert "ricostruzione ex-post" in html.lower()
+    assert "non è il valore osservato dal daemon" in html.lower() or (
+        "non e' il valore osservato dal daemon" in html.lower()
+    )
+    assert "0.87" in html  # soglia enter BTC
+    assert "0.59" in html  # soglia exit BTC

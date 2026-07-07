@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from dashboard.queries import HistoryRow  # noqa: E402
 from dashboard.sanity import SanityFinding  # noqa: E402
+from dashboard.vol_reconstruction import VolSeries  # noqa: E402
 
 MISSING_NUMERIC_VOL_NOTE = (
     "Lo schema attuale non persiste il VALORE NUMERICO dell'EWMA vol calcolato da "
@@ -38,6 +39,16 @@ MISSING_NUMERIC_VOL_NOTE = (
     "non è costruibile con i dati oggi disponibili. Sotto: la timeline di stato, "
     "che è tutto ciò che lo storico contiene. Estendere lo schema del collector per "
     "catturare anche il valore numerico è una decisione di schema separata, non presa qui."
+)
+
+EX_POST_RECONSTRUCTION_NOTE = (
+    "RICOSTRUZIONE EX-POST — stimatore identico (regime.vol_state.compute_ewma_vol, "
+    "span da config/regime.yaml), fetch INDIPENDENTE eseguito ora sulle stesse candele "
+    "pubbliche OKX di regime-daemon. NON È IL VALORE OSSERVATO DAL DAEMON: il daemon "
+    "calcola questo numero a ogni ciclo ma non lo persiste mai (vedi nota sopra) — "
+    "questo grafico lo ricalcola a posteriori, con piccole divergenze attese (revisioni "
+    "tardive delle candele OKX, timing del fetch) rispetto a cosa il daemon avrebbe "
+    "realmente visto in ciascun momento storico."
 )
 
 LEVEL_EDGE_NOTE = (
@@ -118,6 +129,71 @@ def render_staleness_png(rows: list[HistoryRow]) -> bytes:
     return _fig_to_png_bytes(fig)
 
 
+def render_vol_reconstruction_png(vol_series_by_asset: dict[str, VolSeries]) -> bytes:
+    """Grafico "principale" richiesto in origine — vedi
+    `EX_POST_RECONSTRUCTION_NOTE`: la label compare ANCHE incisa nel
+    grafico stesso (non solo nell'HTML circostante), perché un'immagine
+    PNG può essere condivisa/salvata separatamente dal resto della
+    pagina."""
+    fig, ax = plt.subplots(figsize=(9, 4))
+    if vol_series_by_asset:
+        colors = {"BTC": "#d08000", "ETH": "#4060c0"}
+        for asset, series in vol_series_by_asset.items():
+            color = colors.get(asset, None)
+            ax.plot(series.vol.index, series.vol.values, label=f"{asset} vol EWMA", color=color)
+            ax.axhline(
+                series.enter_threshold, color=color, linestyle="--", linewidth=0.8, alpha=0.7
+            )
+            ax.axhline(
+                series.exit_threshold, color=color, linestyle=":", linewidth=0.8, alpha=0.7
+            )
+            ax.axhspan(
+                series.exit_threshold, series.enter_threshold, color=color, alpha=0.06
+            )
+        ax.legend(loc="upper left", fontsize=8)
+        ax.set_ylabel("vol EWMA annualizzata")
+        ax.text(
+            0.5,
+            0.97,
+            "RICOSTRUZIONE EX-POST — non è il valore osservato dal daemon",
+            transform=ax.transAxes,
+            ha="center",
+            va="top",
+            fontsize=8,
+            color="#a02020",
+            bbox={"boxstyle": "round", "facecolor": "#fff3cd", "edgecolor": "#d0a000"},
+        )
+    else:
+        ax.text(0.5, 0.5, "nessun dato", ha="center", va="center")
+    ax.set_title("Vol EWMA ricostruita ex-post con soglie enter/exit — BTC/ETH")
+    fig.autofmt_xdate()
+    return _fig_to_png_bytes(fig)
+
+
+def _vol_reconstruction_section_html(vol_series_by_asset: dict[str, VolSeries] | None) -> str:
+    if not vol_series_by_asset:
+        return (
+            '<p style="background:#fff3cd; padding:0.6em; border:1px solid #d0a000;">'
+            f"{escape(MISSING_NUMERIC_VOL_NOTE)}</p>"
+        )
+    chart = _png_to_img_tag(
+        render_vol_reconstruction_png(vol_series_by_asset), "vol EWMA ricostruita ex-post"
+    )
+    thresholds_rows = "\n".join(
+        f"<tr><td>{escape(asset)}</td><td>{s.enter_threshold:.2f}</td>"
+        f"<td>{s.exit_threshold:.2f}</td></tr>"
+        for asset, s in vol_series_by_asset.items()
+    )
+    return (
+        '<p style="background:#fff3cd; padding:0.6em; border:1px solid #d0a000;">'
+        f"{escape(EX_POST_RECONSTRUCTION_NOTE)}</p>"
+        f"{chart}"
+        '<table border="1" cellpadding="4" cellspacing="0">'
+        "<tr><th>Asset</th><th>Soglia enter</th><th>Soglia exit</th></tr>"
+        f"{thresholds_rows}</table>"
+    )
+
+
 def _findings_html(findings: list[SanityFinding]) -> str:
     if not findings:
         return '<p style="color:#2a7f2a;"><strong>Nessuna anomalia rilevata.</strong></p>'
@@ -164,12 +240,19 @@ def render_html(
     rows_by_insertion_order: list[HistoryRow],
     meta: dict[str, datetime],
     findings: list[SanityFinding],
+    vol_series_by_asset: dict[str, VolSeries] | None = None,
 ) -> str:
     """Ritorna il contenuto HTML (senza scheletro `<html>`/`<head>`/`<body>`
-    — solo il contenuto, coerente con come questo repo pubblica pagine)."""
+    — solo il contenuto, coerente con come questo repo pubblica pagine).
+
+    `vol_series_by_asset` è opzionale: se assente, la sezione vol mostra
+    solo la nota sul limite dichiarato (nessun valore numerico nello
+    storico); se fornito, mostra la ricostruzione ex-post — vedi
+    `EX_POST_RECONSTRUCTION_NOTE`."""
     summary = build_header_summary(rows, meta)
     state_chart = _png_to_img_tag(render_state_timeline_png(rows), "timeline stato BTC/ETH")
     staleness_chart = _png_to_img_tag(render_staleness_png(rows), "eta' snapshot alla raccolta")
+    vol_section = _vol_reconstruction_section_html(vol_series_by_asset)
 
     return f"""
 <h1>Dashboard shadow — regime layer (dati reali, generato in locale)</h1>
@@ -186,10 +269,8 @@ def render_html(
 <h2>Data-sanity (smoke test del collector)</h2>
 {_findings_html(findings)}
 
-<h2>Limite dichiarato: nessuna vol numerica nello storico</h2>
-<p style="background:#fff3cd; padding:0.6em; border:1px solid #d0a000;">
-{escape(MISSING_NUMERIC_VOL_NOTE)}
-</p>
+<h2>Vol EWMA — ricostruzione ex-post</h2>
+{vol_section}
 
 <h2>Timeline di stato (alto/basso vol) — BTC/ETH</h2>
 {state_chart}
