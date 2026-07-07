@@ -16,6 +16,11 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
 ]
+# Solo per il rendering locale della dashboard (scripts/render_shadow_dashboard.py):
+# MAI installato sul VPS (i tre processi runtime non la richiedono).
+dashboard = [
+    "matplotlib>=3.8",
+]
 
 [tool.ruff]
 line-length = 100
