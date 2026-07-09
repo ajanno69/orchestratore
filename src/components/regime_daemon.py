@@ -234,7 +234,18 @@ def run_loop(
     insieme), il fallimento dell'invio NON deve propagare e uccidere il
     loop — altrimenti il pattern VIVO-MA-CIECO diventerebbe MORTO-E-MUTO,
     esattamente il rischio già dichiarato in ADR-037 §8. Ultima risorsa:
-    stderr (catturato da systemd nel journal), mai un'eccezione."""
+    stderr (catturato da systemd nel journal), mai un'eccezione.
+
+    Un `healthcheck_sink.ping()` fallito DOPO che `run_once` ha già
+    scritto con successo lo snapshot (finding review 33a477c, chiuso
+    2026-07-09) NON è un ciclo di misura fallito: la misura è riuscita,
+    lo snapshot esiste. Non deve incrementare `consecutive_failures` né
+    generare un alert LAYER CIECO — il mancato ping è già rilevato da
+    healthchecks.io per costruzione (il check risulta in ritardo da
+    solo), un secondo canale di notifica qui duplicherebbe rumore senza
+    aggiungere segnale. `try/except/else` separa esplicitamente le due
+    cause: l'`except` cattura SOLO un fallimento di `run_once`, l'`else`
+    gestisce il ping (eseguito solo se `run_once` non ha sollevato)."""
     initial_snapshot = resolve_initial_snapshot(store)
     states = RegimeDaemonStates.seeded_from(initial_snapshot, regime_config)
 
@@ -243,8 +254,6 @@ def run_loop(
     while max_iterations is None or iteration < max_iterations:
         try:
             run_once(exchange, funding_source, states, store, now=now_fn(), sleep_fn=sleep_fn)
-            healthcheck_sink.ping()
-            consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - confine di resilienza intenzionale, vedi docstring
             consecutive_failures += 1
             if consecutive_failures >= consecutive_failures_before_alert:
@@ -262,6 +271,17 @@ def run_loop(
                         f"{alert_exc!r} (causa originale del ciclo fallito: {exc!r})",
                         file=sys.stderr,
                     )
+        else:
+            consecutive_failures = 0
+            try:
+                healthcheck_sink.ping()
+            except Exception as ping_exc:  # noqa: BLE001 - vedi docstring, mai propagare da qui
+                print(
+                    f"[regime-daemon] ping healthcheck fallito dopo una misura riuscita: "
+                    f"{ping_exc!r} — la misura NON e' fallita, nessun alert CIECO da qui "
+                    "(il check risulta comunque in ritardo su healthchecks.io per costruzione).",
+                    file=sys.stderr,
+                )
         iteration += 1
         if max_iterations is None or iteration < max_iterations:
             sleep_fn(poll_interval.total_seconds())

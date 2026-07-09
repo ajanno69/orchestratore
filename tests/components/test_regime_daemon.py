@@ -535,6 +535,109 @@ def test_run_loop_pings_healthcheck_only_on_successful_cycles(tmp_path):
     assert len(pings) == 3
 
 
+def test_run_loop_ping_failure_after_successful_cycle_does_not_alert(tmp_path):
+    """Chiude la nota minore lasciata aperta dalla review del commit
+    33a477c (2026-07-09): se `healthcheck_sink.ping()` fallisce DOPO che
+    `run_once` ha già scritto con successo lo snapshot, il ciclo di
+    MISURA non è fallito — non deve essere etichettato come tale, non
+    deve incrementare `consecutive_failures`, non deve mai produrre un
+    alert LAYER CIECO. Il mancato ping è già rilevato da healthchecks.io
+    per costruzione (il check risulta in ritardo/scaduto da solo) — un
+    secondo canale di notifica qui duplicherebbe rumore, non aggiungerebbe
+    segnale."""
+    store = RegimeStateStore(tmp_path)
+    exchange = FakeExchange(
+        {"BTC/USDT": make_candles(200, 0.0), "ETH/USDT": make_candles(200, 0.0)}
+    )
+    alerts: list[str] = []
+
+    class RecordingAlertSink:
+        def send(self, text: str) -> None:
+            alerts.append(text)
+
+    class FailingHealthcheckSink:
+        def ping(self) -> None:
+            raise TimeoutError("healthchecks.io irraggiungibile")
+
+    run_loop(
+        exchange,
+        FakeFundingSource(0.0),
+        store,
+        REGIME_CONFIG,
+        poll_interval=timedelta(minutes=15),
+        alert_sink=RecordingAlertSink(),
+        healthcheck_sink=FailingHealthcheckSink(),
+        max_iterations=CONSECUTIVE_FAILURES_BEFORE_ALERT + 2,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+
+    assert alerts == [], (
+        "un ping fallito dopo una misura riuscita non deve MAI alertare, nemmeno ripetuto "
+        "per piu' cicli di quanti servirebbero a superare la soglia di fallimenti consecutivi"
+    )
+    assert store.read() is not None, "lo snapshot della misura riuscita deve restare scritto"
+
+
+def test_run_loop_ping_failure_does_not_propagate_and_does_not_count_as_measurement_failure(
+    tmp_path,
+):
+    """Un ping fallito non deve mai far crashare il loop (stessa
+    disciplina già in uso per l'invio dell'alert stesso), e soprattutto
+    non deve "contaminare" il contatore di fallimenti consecutivi: un
+    vero fallimento di MISURA isolato subito dopo una serie di ping
+    falliti deve restare sotto soglia, esattamente come se i ping falliti
+    non fossero mai avvenuti."""
+    store = RegimeStateStore(tmp_path)
+
+    class ExchangeOkThenOneRealFailure:
+        """3 cicli di misura riuscita (con ping sempre fallito), poi UN
+        singolo ciclo di misura davvero fallito — isolato, deve restare
+        silenzioso se il contatore non è stato contaminato dai ping."""
+
+        def __init__(self, ok_candles: dict[str, list[list]]) -> None:
+            self._ok_candles = ok_candles
+            self._btc_calls = 0
+
+        def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
+            if symbol == "BTC/USDT":
+                self._btc_calls += 1
+                if self._btc_calls == 4:
+                    raise ConnectionError("simulato: unico fallimento di misura reale")
+            return self._ok_candles[symbol]
+
+    exchange = ExchangeOkThenOneRealFailure(
+        {"BTC/USDT": make_candles(200, 0.0), "ETH/USDT": make_candles(200, 0.0)}
+    )
+    alerts: list[str] = []
+
+    class RecordingAlertSink:
+        def send(self, text: str) -> None:
+            alerts.append(text)
+
+    class FailingHealthcheckSink:
+        def ping(self) -> None:
+            raise TimeoutError("healthchecks.io irraggiungibile")
+
+    run_loop(
+        exchange,
+        FakeFundingSource(0.0),
+        store,
+        REGIME_CONFIG,
+        poll_interval=timedelta(minutes=15),
+        alert_sink=RecordingAlertSink(),
+        healthcheck_sink=FailingHealthcheckSink(),
+        max_iterations=4,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+
+    assert alerts == [], (
+        "il 4° ciclo (unico fallimento di misura reale, isolato) deve restare sotto soglia — "
+        "se i 3 ping falliti precedenti avessero contaminato il contatore, questo alerterebbe"
+    )
+
+
 def test_build_sinks_returns_dry_run_pair_when_dry_run_true_ignoring_env():
     from alerting.sinks import DryRunAlertSink, DryRunHealthcheckSink
 
