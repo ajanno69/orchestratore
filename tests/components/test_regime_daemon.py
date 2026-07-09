@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 
 from components.regime_daemon import (
+    CONSECUTIVE_FAILURES_BEFORE_ALERT,
+    FETCH_MAX_ATTEMPTS,
     RegimeDaemonStates,
+    _call_with_retry,
     build_sinks,
     fetch_latest_returns,
     run_loop,
@@ -196,8 +199,103 @@ def test_run_once_propagates_fetch_failure_without_writing_snapshot(tmp_path):
         build_snapshot(False, False, False, now=NOW), REGIME_CONFIG
     )
     with pytest.raises(ConnectionError):
-        run_once(FailingExchange(), FakeFundingSource(0.0), states, store, now=NOW)
+        run_once(
+            FailingExchange(), FakeFundingSource(0.0), states, store, now=NOW,
+            sleep_fn=lambda seconds: None,
+        )
     assert store.read() is None, "un ciclo fallito non deve scrivere nessuno snapshot"
+
+
+# --- retry con backoff intra-ciclo (finding 2026-07-09, docs/m2-shadow- --
+# --- network-resilience-finding-2026-07-09.md: 12 alert LAYER CIECO in --
+# --- 43h di shadow per NetworkError verso OKX) ---------------------------
+
+
+def test_call_with_retry_returns_result_on_first_success():
+    calls: list[int] = []
+
+    def fn():
+        calls.append(1)
+        return "ok"
+
+    result = _call_with_retry(fn, max_attempts=3, backoff_seconds=2.0, sleep_fn=lambda s: None)
+
+    assert result == "ok"
+    assert len(calls) == 1
+
+
+def test_call_with_retry_recovers_after_one_transient_failure():
+    calls: list[int] = []
+
+    def fn():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConnectionError("blip")
+        return "ok"
+
+    sleeps: list[float] = []
+    result = _call_with_retry(
+        fn, max_attempts=3, backoff_seconds=2.0, sleep_fn=lambda s: sleeps.append(s)
+    )
+
+    assert result == "ok"
+    assert len(calls) == 2
+    assert sleeps == [2.0], "backoff lineare: 2s prima del secondo tentativo"
+
+
+def test_call_with_retry_raises_last_exception_after_exhausting_attempts():
+    def fn():
+        raise ConnectionError("sempre giu'")
+
+    sleeps: list[float] = []
+    with pytest.raises(ConnectionError, match="sempre giu'"):
+        _call_with_retry(
+            fn, max_attempts=3, backoff_seconds=2.0, sleep_fn=lambda s: sleeps.append(s)
+        )
+
+    assert sleeps == [2.0, 4.0], "backoff lineare crescente, MAI dopo l'ultimo tentativo fallito"
+
+
+class FlakyOnceExchange:
+    """Fallisce la prima chiamata fetch_ohlcv per BTC, ha successo su
+    tutte le chiamate successive (incluso il retry immediatamente dopo)
+    — simula un blip di rete singolo assorbito dal retry intra-ciclo,
+    senza mai far fallire l'intero ciclo di misura."""
+
+    def __init__(self, candles_by_symbol: dict[str, list[list]]) -> None:
+        self._candles_by_symbol = candles_by_symbol
+        self._btc_calls = 0
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
+        if symbol == "BTC/USDT":
+            self._btc_calls += 1
+            if self._btc_calls == 1:
+                raise ConnectionError("blip simulato")
+        return self._candles_by_symbol[symbol]
+
+
+def test_run_once_recovers_from_transient_fetch_failure_via_intra_cycle_retry(tmp_path):
+    """Un blip singolo (1 fallimento poi successo) non deve far fallire
+    l'intero ciclo — il retry intra-ciclo lo assorbe silenziosamente,
+    run_once ha successo e scrive uno snapshot, senza mai bollare la
+    misura come 'ciclo fallito' a run_loop."""
+    exchange = FlakyOnceExchange(
+        {"BTC/USDT": make_candles(200, 0.0), "ETH/USDT": make_candles(200, 0.0)}
+    )
+    store = RegimeStateStore(tmp_path)
+    states = RegimeDaemonStates.seeded_from(
+        build_snapshot(False, False, False, now=NOW), REGIME_CONFIG
+    )
+    sleeps: list[float] = []
+
+    snapshot = run_once(
+        exchange, FakeFundingSource(0.0), states, store, now=NOW,
+        sleep_fn=lambda s: sleeps.append(s),
+    )
+
+    assert snapshot is not None
+    assert store.read() == snapshot
+    assert sleeps == [2.0], "il retry e' avvenuto davvero (backoff registrato), non solo per caso"
 
 
 def test_run_loop_seeds_states_from_persisted_snapshot_on_restart(tmp_path):
@@ -251,7 +349,14 @@ def test_run_loop_seeds_states_from_persisted_snapshot_on_restart(tmp_path):
     )
 
 
-def test_run_loop_alerts_and_continues_on_cycle_failure_without_pinging(tmp_path):
+def test_run_loop_single_isolated_cycle_failure_does_not_alert(tmp_path):
+    """Chiude il finding 2026-07-09 (12 alert LAYER CIECO in 43h di shadow
+    per NetworkError verso OKX, docs/m2-shadow-network-resilience-finding-
+    2026-07-09.md): un singolo ciclo isolato fallito (che esaurisce anche
+    il retry intra-ciclo) non deve piu' generare un alert Telegram — solo
+    un fallimento PERSISTENTE lo fa (vedi test successivo). Il ping
+    healthcheck resta comunque assente sul ciclo fallito (VIVO-MA-CIECO
+    invariato): l'assenza di rumore non e' l'assenza del fail-safe."""
     store = RegimeStateStore(tmp_path)
     alerts: list[str] = []
     pings: list[int] = []
@@ -272,14 +377,131 @@ def test_run_loop_alerts_and_continues_on_cycle_failure_without_pinging(tmp_path
         poll_interval=timedelta(minutes=15),
         alert_sink=RecordingAlertSink(),
         healthcheck_sink=RecordingHealthcheckSink(),
-        max_iterations=2,
+        max_iterations=CONSECUTIVE_FAILURES_BEFORE_ALERT - 1,
         sleep_fn=lambda seconds: None,
         now_fn=lambda: NOW,
     )
 
-    assert len(alerts) == 2, "ogni ciclo fallito deve generare un alert"
-    assert "LAYER CIECO" in alerts[0]
+    assert alerts == [], "un fallimento sotto soglia deve restare silenzioso"
     assert pings == [], "nessun ping healthcheck su un ciclo fallito (VIVO-MA-CIECO)"
+
+
+def test_run_loop_alerts_on_every_cycle_once_consecutive_failure_threshold_reached(tmp_path):
+    """Fallimento PERSISTENTE (soglia CONSECUTIVE_FAILURES_BEFORE_ALERT
+    raggiunta) deve alertare — e continuare ad alertare su OGNI ciclo
+    ancora fallito, non solo una volta: stesso principio gia' imparato
+    con WiringSequencer in questa stessa sessione (un design che tace
+    durante un problema prolungato e' un bug, non un pregio)."""
+    store = RegimeStateStore(tmp_path)
+    alerts: list[str] = []
+
+    class RecordingAlertSink:
+        def send(self, text: str) -> None:
+            alerts.append(text)
+
+    class RecordingHealthcheckSink:
+        def ping(self) -> None:
+            pass
+
+    total_iterations = CONSECUTIVE_FAILURES_BEFORE_ALERT + 2
+    run_loop(
+        FailingExchange(),
+        FakeFundingSource(0.0),
+        store,
+        REGIME_CONFIG,
+        poll_interval=timedelta(minutes=15),
+        alert_sink=RecordingAlertSink(),
+        healthcheck_sink=RecordingHealthcheckSink(),
+        max_iterations=total_iterations,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+
+    expected_alert_count = total_iterations - (CONSECUTIVE_FAILURES_BEFORE_ALERT - 1)
+    assert len(alerts) == expected_alert_count, (
+        "deve alertare da quando la soglia e' raggiunta e MAI piu' tacere mentre resta guasto"
+    )
+    assert "LAYER CIECO" in alerts[0]
+    assert f"{CONSECUTIVE_FAILURES_BEFORE_ALERT} fallimenti consecutivi" in alerts[0]
+    assert f"{total_iterations} fallimenti consecutivi" in alerts[-1]
+
+
+def _scripted_btc_call_outcomes(cycle_outcomes: list[bool], max_attempts: int) -> list[bool]:
+    """cycle_outcomes: un bool per ciclo (True=successo). Un ciclo di
+    successo consuma 1 chiamata BTC (successo); un ciclo di fallimento
+    consuma `max_attempts` chiamate (tutte fallite, il retry intra-ciclo
+    le esaurisce tutte prima che run_once sollevi) — espande la lista
+    piatta di esiti, una per ogni chiamata fetch_ohlcv BTC che verra'
+    fatta, nell'ordine. Decoupled da FETCH_MAX_ATTEMPTS: se cambia la
+    costante, questo helper si adatta senza modifiche."""
+    calls: list[bool] = []
+    for ok in cycle_outcomes:
+        calls.extend([True] if ok else [False] * max_attempts)
+    return calls
+
+
+class ExchangeWithScriptedBtcCalls:
+    """Fake exchange guidato da una lista di esiti pre-calcolata (vedi
+    `_scripted_btc_call_outcomes`) — permette di scriptare esattamente
+    quali cicli falliscono e quali riescono, indipendentemente da quanti
+    tentativi di retry consuma un ciclo fallito."""
+
+    def __init__(self, candles_by_symbol: dict[str, list[list]], call_outcomes: list[bool]) -> None:
+        self._candles_by_symbol = candles_by_symbol
+        self._call_outcomes = call_outcomes
+        self._btc_call_count = 0
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
+        if symbol == "BTC/USDT":
+            outcome = self._call_outcomes[self._btc_call_count]
+            self._btc_call_count += 1
+            if not outcome:
+                raise ConnectionError(f"simulato (chiamata BTC #{self._btc_call_count})")
+        return self._candles_by_symbol[symbol]
+
+
+def test_run_loop_resets_consecutive_failure_counter_after_a_successful_cycle(tmp_path):
+    """Il contatore di fallimenti consecutivi si azzera davvero dopo un
+    ciclo riuscito — non e' un contatore monotono. Sequenza: fallisce,
+    fallisce (soglia raggiunta, 1 alert), RIESCE (azzera), fallisce di
+    nuovo — dovendo restare silenzioso essendo di nuovo un singolo
+    fallimento isolato, non il terzo di una serie."""
+    assert CONSECUTIVE_FAILURES_BEFORE_ALERT == 2, (
+        "questo test e' scritto per la soglia N=2 proposta da Andrea 2026-07-09; "
+        "se cambia, va riscritta la sequenza di esiti sotto"
+    )
+    outcomes = _scripted_btc_call_outcomes([False, False, True, False], FETCH_MAX_ATTEMPTS)
+    exchange = ExchangeWithScriptedBtcCalls(
+        {"BTC/USDT": make_candles(200, 0.0), "ETH/USDT": make_candles(200, 0.0)}, outcomes
+    )
+    store = RegimeStateStore(tmp_path)
+    alerts: list[str] = []
+
+    class RecordingAlertSink:
+        def send(self, text: str) -> None:
+            alerts.append(text)
+
+    class RecordingHealthcheckSink:
+        def ping(self) -> None:
+            pass
+
+    run_loop(
+        exchange,
+        FakeFundingSource(0.0),
+        store,
+        REGIME_CONFIG,
+        poll_interval=timedelta(minutes=15),
+        alert_sink=RecordingAlertSink(),
+        healthcheck_sink=RecordingHealthcheckSink(),
+        max_iterations=4,
+        sleep_fn=lambda seconds: None,
+        now_fn=lambda: NOW,
+    )
+
+    assert len(alerts) == 1, (
+        "solo il ciclo 2 (soglia raggiunta) deve alertare; il ciclo 4 e' di nuovo isolato "
+        "grazie al reset del contatore dopo il successo del ciclo 3"
+    )
 
 
 def test_run_loop_pings_healthcheck_only_on_successful_cycles(tmp_path):

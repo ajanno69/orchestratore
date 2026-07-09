@@ -39,6 +39,35 @@ DEFAULT_POLL_INTERVAL = timedelta(minutes=15)  # ADR-037 §10
 LOOKBACK_CANDLES = 200  # ADR-037 §10: ~6x ewma_span=32, decadimento esponenziale del filtro
 MIN_CANDLES_FRACTION = 0.5  # sotto meta' delle candele richieste: fetch parziale, mai silenzioso
 
+# Resilienza rete (finding 2026-07-09, diagnosi read-only su VPS Contabo:
+# docs/m2-shadow-network-resilience-finding-2026-07-09.md — 12 cicli falliti
+# per NetworkError verso OKX in 43h di shadow, ~1 ogni 3-4h, causa isolata,
+# non un problema del nostro client). Due livelli di resilienza distinti,
+# repo-only fino al gate 21/07:
+FETCH_MAX_ATTEMPTS = 3  # 1 tentativo iniziale + 2 retry, assorbe blip sub-minuto
+FETCH_RETRY_BACKOFF_SECONDS = 2.0  # backoff lineare: 2s prima del 2°, 4s prima del 3°
+CONSECUTIVE_FAILURES_BEFORE_ALERT = 2  # Andrea 2026-07-09, margine sotto staleness (60min/4 cicli)
+
+
+def _call_with_retry(fn, max_attempts: int, backoff_seconds: float, sleep_fn=time.sleep):
+    """Retry con backoff LINEARE (`backoff_seconds * tentativo`) per
+    assorbire blip di rete momentanei (sub-minuto) prima che l'intero
+    ciclo di misura sia considerato fallito. `max_attempts` è il numero
+    TOTALE di tentativi (incluso il primo, non solo i retry). Propaga
+    l'ULTIMA eccezione se tutti i tentativi falliscono — `run_once`/
+    `run_loop` restano gli unici punti che decidono cosa fare di un
+    ciclo davvero fallito, questa funzione si limita ad assorbire i blip
+    più brevi del budget di retry, mai a nascondere un guasto reale."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - si vuole ritentare QUALUNQUE eccezione di rete
+            last_exc = exc
+            if attempt < max_attempts:
+                sleep_fn(backoff_seconds * attempt)
+    raise last_exc  # max_attempts >= 1 garantisce che last_exc sia stato assegnato
+
 
 class OhlcvSource(Protocol):
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list]: ...
@@ -112,20 +141,42 @@ def run_once(
     states: RegimeDaemonStates,
     store: RegimeStateStore,
     now: datetime,
+    sleep_fn=time.sleep,
 ) -> RegimeSnapshot:
     """Un ciclo di misura completo. Propaga qualunque eccezione (fetch,
     parsing, stato non finito) senza scrivere uno snapshot parziale o
     scorretto — il chiamante (`run_loop`) decide cosa fare di un ciclo
-    fallito, questa funzione non deve mai "indovinare" un default."""
-    btc_returns = fetch_latest_returns(exchange, "BTC")
+    fallito, questa funzione non deve mai "indovinare" un default.
+
+    Le tre chiamate di rete (candele BTC, candele ETH, funding rate) sono
+    avvolte in `_call_with_retry`: un blip singolo viene assorbito qui,
+    senza mai emergere come "ciclo fallito" a `run_loop` (finding
+    2026-07-09, vedi costanti `FETCH_MAX_ATTEMPTS`/
+    `FETCH_RETRY_BACKOFF_SECONDS` sopra)."""
+    btc_returns = _call_with_retry(
+        lambda: fetch_latest_returns(exchange, "BTC"),
+        max_attempts=FETCH_MAX_ATTEMPTS,
+        backoff_seconds=FETCH_RETRY_BACKOFF_SECONDS,
+        sleep_fn=sleep_fn,
+    )
     btc_vol = compute_ewma_vol(btc_returns, span=states.btc_vol.config.ewma_span).iloc[-1]
     btc_high_vol = states.btc_vol.update(float(btc_vol))
 
-    eth_returns = fetch_latest_returns(exchange, "ETH")
+    eth_returns = _call_with_retry(
+        lambda: fetch_latest_returns(exchange, "ETH"),
+        max_attempts=FETCH_MAX_ATTEMPTS,
+        backoff_seconds=FETCH_RETRY_BACKOFF_SECONDS,
+        sleep_fn=sleep_fn,
+    )
     eth_vol = compute_ewma_vol(eth_returns, span=states.eth_vol.config.ewma_span).iloc[-1]
     eth_high_vol = states.eth_vol.update(float(eth_vol))
 
-    funding_rate = funding_source.fetch("ETH")
+    funding_rate = _call_with_retry(
+        lambda: funding_source.fetch("ETH"),
+        max_attempts=FETCH_MAX_ATTEMPTS,
+        backoff_seconds=FETCH_RETRY_BACKOFF_SECONDS,
+        sleep_fn=sleep_fn,
+    )
     eth_harvester_on = states.eth_funding.update(float(funding_rate))
 
     snapshot = build_snapshot(
@@ -151,17 +202,30 @@ def run_loop(
     max_iterations: int | None = None,
     sleep_fn=time.sleep,
     now_fn=lambda: datetime.now(UTC),
+    consecutive_failures_before_alert: int = CONSECUTIVE_FAILURES_BEFORE_ALERT,
 ) -> None:
     """Loop di produzione. `max_iterations=None` gira per sempre (uso
     reale, systemd); un intero finito è per `--once`/test/smoke test.
 
-    Un ciclo fallito (`run_once` che solleva) NON interrompe il loop: si
-    invia un alert e si passa al ciclo successivo, senza pingare
-    l'healthcheck (pattern VIVO-MA-CIECO — il ping conferma solo che il
-    lavoro è stato fatto, non solo che il processo è vivo). L'except largo
-    qui è intenzionale ed è l'unico punto del codice dove è corretto: è il
-    confine di resilienza del loop di produzione, non un tentativo di
-    nascondere un bug — il messaggio include sempre l'eccezione reale.
+    Un ciclo fallito (`run_once` che solleva, dopo aver esaurito anche il
+    retry intra-ciclo) NON interrompe il loop: si passa al ciclo
+    successivo, senza pingare l'healthcheck (pattern VIVO-MA-CIECO — il
+    ping conferma solo che il lavoro è stato fatto, non solo che il
+    processo è vivo). L'except largo qui è intenzionale ed è l'unico
+    punto del codice dove è corretto: è il confine di resilienza del loop
+    di produzione, non un tentativo di nascondere un bug — il messaggio
+    include sempre l'eccezione reale.
+
+    L'ALERT (non il fail-safe: nessuno snapshot viene MAI scritto su un
+    ciclo fallito, a prescindere) è inviato solo quando i fallimenti
+    CONSECUTIVI raggiungono `consecutive_failures_before_alert` (finding
+    2026-07-09: 12 alert in 43h di shadow per singoli blip di rete isolati
+    — rumore, non segnale). Una volta raggiunta la soglia, l'alert viene
+    inviato su OGNI ciclo ancora fallito, non solo la prima volta (stesso
+    principio già imparato con `WiringSequencer`: un design che tace
+    durante un problema prolungato è un bug). Il contatore si azzera su
+    ogni ciclo riuscito — non è mai un budget "consumato una volta per
+    sempre" per il processo.
 
     Anche l'invio dell'alert stesso è protetto (finding review
     indipendente, ADR-037 §10): se il canale di alert è irraggiungibile
@@ -175,24 +239,29 @@ def run_loop(
     states = RegimeDaemonStates.seeded_from(initial_snapshot, regime_config)
 
     iteration = 0
+    consecutive_failures = 0
     while max_iterations is None or iteration < max_iterations:
         try:
-            run_once(exchange, funding_source, states, store, now=now_fn())
+            run_once(exchange, funding_source, states, store, now=now_fn(), sleep_fn=sleep_fn)
             healthcheck_sink.ping()
+            consecutive_failures = 0
         except Exception as exc:  # noqa: BLE001 - confine di resilienza intenzionale, vedi docstring
-            message = (
-                "LAYER CIECO — regime-daemon: ciclo di misura fallito "
-                f"({exc!r}). Nessuno snapshot scritto in questo ciclo, "
-                "il precedente resta valido fino alla soglia di staleness."
-            )
-            try:
-                alert_sink.send(message)
-            except Exception as alert_exc:  # noqa: BLE001 - vedi docstring, mai propagare da qui
-                print(
-                    f"[regime-daemon] impossibile inviare l'alert di ciclo fallito: "
-                    f"{alert_exc!r} (causa originale del ciclo fallito: {exc!r})",
-                    file=sys.stderr,
+            consecutive_failures += 1
+            if consecutive_failures >= consecutive_failures_before_alert:
+                message = (
+                    "LAYER CIECO — regime-daemon: ciclo di misura fallito "
+                    f"({exc!r}). {consecutive_failures} fallimenti consecutivi. "
+                    "Nessuno snapshot scritto in questo ciclo, il precedente "
+                    "resta valido fino alla soglia di staleness."
                 )
+                try:
+                    alert_sink.send(message)
+                except Exception as alert_exc:  # noqa: BLE001 - vedi docstring, mai propagare da qui
+                    print(
+                        f"[regime-daemon] impossibile inviare l'alert di ciclo fallito: "
+                        f"{alert_exc!r} (causa originale del ciclo fallito: {exc!r})",
+                        file=sys.stderr,
+                    )
         iteration += 1
         if max_iterations is None or iteration < max_iterations:
             sleep_fn(poll_interval.total_seconds())
