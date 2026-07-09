@@ -593,7 +593,16 @@ def test_run_loop_ping_failure_does_not_propagate_and_does_not_count_as_measurem
     class ExchangeOkThenOneRealFailure:
         """3 cicli di misura riuscita (con ping sempre fallito), poi UN
         singolo ciclo di misura davvero fallito — isolato, deve restare
-        silenzioso se il contatore non è stato contaminato dai ping."""
+        silenzioso se il contatore non è stato contaminato dai ping.
+
+        Il 4° ciclo deve fallire TUTTI i tentativi (non solo il primo):
+        con retry intra-ciclo (FETCH_MAX_ATTEMPTS) un fallimento
+        singolo verrebbe assorbito silenziosamente e il ciclo
+        risulterebbe riuscito (finding review 05d1e02: la prima
+        versione di questo fake falliva solo un tentativo, il retry lo
+        assorbiva, e il test passava per il motivo sbagliato — nessun
+        ciclo falliva davvero, quindi l'assenza di alert non provava
+        nulla sulla non-contaminazione del contatore)."""
 
         def __init__(self, ok_candles: dict[str, list[list]]) -> None:
             self._ok_candles = ok_candles
@@ -602,7 +611,9 @@ def test_run_loop_ping_failure_does_not_propagate_and_does_not_count_as_measurem
         def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> list[list]:
             if symbol == "BTC/USDT":
                 self._btc_calls += 1
-                if self._btc_calls == 4:
+                # cicli 1-3: chiamate BTC #1, #2, #3 (successo diretto, 1 per ciclo)
+                # ciclo 4: chiamate BTC #4, #5, #6 (tutti i FETCH_MAX_ATTEMPTS tentativi fallati)
+                if 4 <= self._btc_calls <= 3 + FETCH_MAX_ATTEMPTS:
                     raise ConnectionError("simulato: unico fallimento di misura reale")
             return self._ok_candles[symbol]
 
@@ -632,6 +643,10 @@ def test_run_loop_ping_failure_does_not_propagate_and_does_not_count_as_measurem
         now_fn=lambda: NOW,
     )
 
+    assert exchange._btc_calls == 3 + FETCH_MAX_ATTEMPTS, (  # noqa: SLF001 - verifica strutturale
+        "il 4° ciclo deve aver esaurito TUTTI i tentativi di retry (fallimento reale, non "
+        "assorbito) — altrimenti l'assenza di alert sotto non proverebbe nulla"
+    )
     assert alerts == [], (
         "il 4° ciclo (unico fallimento di misura reale, isolato) deve restare sotto soglia — "
         "se i 3 ping falliti precedenti avessero contaminato il contatore, questo alerterebbe"
