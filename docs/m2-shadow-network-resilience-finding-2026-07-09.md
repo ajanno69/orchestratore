@@ -142,14 +142,19 @@ il deploy attuale resta invariato). Confermato esplicitamente: `store.write(snap
 istruzione di `run_once`, dopo tutti i fetch e tutti gli `update()` di stato — nessuno snapshot
 parziale in alcun percorso, con o senza retry.
 
-**1 nota minore, preesistente (non introdotta da questo commit), non affrontata in questa
-sessione**: se `healthcheck_sink.ping()` fallisce DOPO che `run_once` ha già scritto con successo
-lo snapshot, il ciclo viene comunque classificato come "misura fallita" nell'except esterno di
-`run_loop`, e — a soglia raggiunta — l'alert direbbe "ciclo di misura fallito... nessuno snapshot
-scritto", entrambe le affermazioni false in quel caso specifico (la misura è riuscita, lo
-snapshot esiste). Non è una regressione di sicurezza (lo snapshot fresco protegge comunque lo
-staleness) e col nuovo design il rumore è già ridotto (un singolo ping-fail resta sotto soglia
-N=2). Dichiarata, non fixata — decisione di Andrea se includerla nel prossimo giro.
+**1 nota minore, preesistente (non introdotta da questo commit) — CHIUSA il 2026-07-09, stesso
+giorno, commit `05d1e02` + `1ecd371`**: se `healthcheck_sink.ping()` falliva DOPO che `run_once`
+aveva già scritto con successo lo snapshot, il ciclo veniva comunque classificato come "misura
+fallita" nell'except esterno di `run_loop`, e — a soglia raggiunta — l'alert avrebbe detto "ciclo
+di misura fallito... nessuno snapshot scritto", entrambe le affermazioni false in quel caso
+specifico. Fix: `try/except/else` separa esplicitamente le due cause — l'`except` cattura SOLO un
+fallimento di `run_once`, l'`else` (eseguito solo se la misura è riuscita) gestisce il ping col
+proprio try/except locale, senza mai contaminare `consecutive_failures`. TDD con due nuovi test;
+un secondo giro di review indipendente ha inizialmente trovato che il primo tentativo del test di
+non-contaminazione non dimostrava nulla (il fake exchange falliva solo un tentativo, assorbito
+dal retry intra-ciclo — corretto per fallire tutti e `FETCH_MAX_ATTEMPTS` i tentativi, con
+un'assertion esplicita sul conteggio chiamate a prova che il fallimento simulato fosse reale).
+**Verdetto finale re-review: GO, nota chiusa a livello di codice.**
 
 ## 5. Stato: IN CODA
 
@@ -170,5 +175,7 @@ unico deploy post-gate porterà entrambi.
 ## 7. Commit
 
 - `33a477c` — feat: retry backoff + soglia alert su fallimenti consecutivi (TDD).
+- `05d1e02` — fix: ping healthcheck fallito non è un ciclo di misura fallito (TDD).
+- `1ecd371` — test: correzione fake exchange, fallimento reale non assorbito dal retry.
 
-Pushato su `master`.
+Tutti pushati su `master`.
