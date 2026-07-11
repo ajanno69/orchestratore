@@ -44,6 +44,27 @@ fail-safe (ADR-037 §3, §10) ha funzionato esattamente come progettato, 12 volt
 - Il riavvio simultaneo dei tre processi orchestrator (2026-07-08 06:46 CEST) è un aggiornamento
   di sicurezza automatico di `python3.12` via `unattended-upgrades` — benigno, non un guasto.
 
+## 1bis. Aggiornamento 2026-07-11 — validazione retrospettiva N=2
+
+Storico esteso a 93+ ore (2026-07-07T10:01 → 2026-07-11T07:13, 344 righe): **30 eventi di
+fallimento totali** (non più solo i 12 iniziali), stesso tasso (~1 ogni 3 ore), stesso
+meccanismo (vedi §2). Ricostruita l'esatta sequenza di `consecutive_failures` come la
+calcolerebbe `run_loop` (si azzera a ogni successo, non un semplice conteggio di gap):
+
+```
+righe totali: 344
+streak massimo di fallimenti CONSECUTIVI mai osservato: 1
+eventi con >=1 fallimento consecutivo: 30, TUTTI con streak=1
+```
+
+**Validazione N=2, dato corretto**: la soglia (2 fallimenti consecutivi) non è MAI stata
+raggiunta in tutto il periodo di shadow osservato finora — ogni singolo fallimento è stato
+isolato, seguito immediatamente da un successo. Con il fix deployato, **tutti e 30** gli eventi
+storici sarebbero stati assorbiti in silenzio: zero alert Telegram generati, contro i 30
+generati oggi dal codice senza soglia. Riduzione del rumore: 100% su questo campione — più forte
+di quanto stimato in una prima lettura affrettata dei dati (vedi §3bis per la correzione e il
+vincolo sui parametri accoppiati).
+
 ## 2. Diagnosi read-only — causa esatta, non più un'ipotesi
 
 Script standalone (`okx_network_probe.py`, MAI una unit systemd, lanciato a mano via `nohup` in
@@ -132,6 +153,53 @@ di silenzio, lasciando 30 minuti di margine prima che la staleness reale scatti 
 staleness resta il fail-safe di ultima istanza, invariata.
 
 TDD: 217/217 test locali verdi, ruff pulito.
+
+## 3bis. Parametri accoppiati — vincolo per chi tocca questi numeri in futuro
+
+Tre numeri, non indipendenti l'uno dall'altro:
+
+| Parametro | Valore | Dove |
+|---|---|---|
+| Cadenza daemon | 15 min | `DEFAULT_POLL_INTERVAL`, `regime_daemon.py` |
+| N fallimenti prima dell'alert | 2 | `CONSECUTIVE_FAILURES_BEFORE_ALERT`, `regime_daemon.py` |
+| Soglia staleness | 60 min (4 cicli) | `wiring_loop`/`regime_wiring.py` (`--staleness-minutes 60`) |
+
+**Relazione (calcolo di design, vedi sopra):** con la cadenza attuale, N=2 fa scattare il primo
+alert dopo 2 cicli falliti consecutivi = **30 minuti** dall'ultimo snapshot valido. La staleness
+scatta a **60 minuti**. Margine nominale tra primo alert e fail-safe di staleness: **30 minuti**
+(2 cicli) — comodo SE il problema si risolve subito dopo l'alert. Se invece il problema
+PERSISTE oltre il 2° fallimento consecutivo (streak che continua a crescere: 3°, 4° fallimento),
+il margine tra "l'operatore è stato avvisato" e "la staleness scatta comunque" si comprime fino
+a **~zero**: il 4° fallimento consecutivo (T+60min) coincide esattamente con la soglia di
+staleness — l'alert non anticipa il fail-safe di un margine significativo in uno scenario di
+guasto sostenuto, lo accompagna quasi in contemporanea.
+
+**Nota onesta sui dati reali disponibili oggi**: questa relazione è un calcolo di design, **non
+ancora verificato da un evento reale**. Lo streak di fallimenti consecutivi più lungo osservato
+in 93+ ore di shadow (2026-07-07→2026-07-11, 344 righe, 30 eventi di fallimento) è **1**, mai 2 —
+ricostruito con l'esatta logica di `consecutive_failures` (si azzera a ogni successo), non con un
+semplice raggruppamento di gap temporali. *(Correzione di sessione: un'analisi precedente aveva
+scambiato due fallimenti isolati ravvicinati del 2026-07-09 per uno streak di 2 — errore
+riconosciuto e corretto qui, prima che finisse in un documento permanente. Vedi verifica
+comando+output in coda a questa sezione.)* La soglia N=2 non è quindi mai stata raggiunta:
+**tutti e 30** gli eventi storici sarebbero stati assorbiti in silenzio dal fix, zero alert
+generati — una validazione più forte del previsto sul fronte "riduzione del rumore", ma nessuna
+prova empirica ancora disponibile sul comportamento al bordo (streak≥2) o sul margine reale verso
+la staleness in un guasto sostenuto.
+
+**Vincolo dichiarato**: chi modifica UNO qualunque dei tre numeri (cadenza, N, soglia staleness)
+deve ricalcolare esplicitamente questa relazione — non è un difetto silenzioso se il margine
+scende a zero per un cambiamento isolato, ma deve essere una scelta consapevole, documentata qui
+o nel documento che la sostituisce, con lo stesso calcolo esplicito sopra come riferimento.
+
+**Verifica comando+output della ricostruzione streak (2026-07-11):**
+```
+$ ssh freqbot@207.180.247.38 "sqlite3 .../history.db \"SELECT snapshot_timestamp FROM regime_history ORDER BY snapshot_timestamp ASC;\"" \
+  | python3 -c "... ricostruzione consecutive_failures esatta, azzerata ad ogni successo ..."
+righe totali: 344
+streak massimo di fallimenti CONSECUTIVI mai osservato: 1
+eventi con >=1 fallimento consecutivo: 30, TUTTI con streak=1
+```
 
 ## 4. Review indipendente (Opus, contesto fresco)
 
